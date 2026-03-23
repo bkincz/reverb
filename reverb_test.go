@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/bkincz/reverb/collections"
 	dbmodels "github.com/bkincz/reverb/db/models"
 	"github.com/bkincz/reverb/db/sqlite"
+	"github.com/bkincz/reverb/forms"
+	"github.com/bkincz/reverb/webhook"
 )
 
 func TestMount_HealthEndpoint(t *testing.T) {
@@ -294,5 +297,97 @@ func TestMount_ABVariantUsesJWTClaims(t *testing.T) {
 	}
 	if body["variant_id"] != "variant-a" {
 		t.Fatalf("variant_id = %q, want %q", body["variant_id"], "variant-a")
+	}
+}
+
+func TestMount_InvalidTrustedProxyFails(t *testing.T) {
+	rb := reverb.New(reverb.Config{
+		DB:             sqlite.New(":memory:"),
+		TrustedProxies: []string{"not-an-ip"},
+	})
+
+	target := reverb.MountTarget{
+		Handle: func(_ string, _ http.Handler) {},
+		Use:    func(_ ...func(http.Handler) http.Handler) {},
+	}
+
+	if err := rb.Mount(context.Background(), target); err == nil {
+		t.Fatal("expected invalid trusted proxy config to fail")
+	}
+}
+
+func TestMount_InvalidWebhookRetryConfigFails(t *testing.T) {
+	rb := reverb.New(reverb.Config{
+		DB: sqlite.New(":memory:"),
+		Webhooks: []webhook.Config{
+			{
+				URL:         "https://example.com/hook",
+				MaxAttempts: -1,
+			},
+		},
+	})
+
+	target := reverb.MountTarget{
+		Handle: func(_ string, _ http.Handler) {},
+		Use:    func(_ ...func(http.Handler) http.Handler) {},
+	}
+
+	if err := rb.Mount(context.Background(), target); err == nil {
+		t.Fatal("expected invalid webhook retry config to fail")
+	}
+}
+
+func TestMount_FormsRateLimitUsesTrustedProxyClientIP(t *testing.T) {
+	rb := reverb.New(reverb.Config{
+		DB: sqlite.New(":memory:"),
+		Forms: reverb.FormsConfig{
+			RateLimitPerMinute: 1,
+		},
+		TrustedProxies: []string{"10.0.0.0/8"},
+	})
+	rb.Form("contact", reverbFormsSchema())
+
+	mux := http.NewServeMux()
+	target := reverb.MountTarget{
+		Handle: func(pattern string, h http.Handler) { mux.Handle(pattern, h) },
+		Use:    func(_ ...func(http.Handler) http.Handler) {},
+	}
+
+	if err := rb.Mount(context.Background(), target); err != nil {
+		t.Fatalf("Mount() error: %v", err)
+	}
+
+	makeRequest := func(clientIP string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/forms/contact", strings.NewReader(`{"email":"alice@example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", clientIP)
+		req.RemoteAddr = "10.0.0.2:4321"
+		req.SetPathValue("slug", "contact")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	first := makeRequest("198.51.100.3")
+	if first.Code != http.StatusNoContent {
+		t.Fatalf("first request = %d, want 204; body: %s", first.Code, first.Body)
+	}
+
+	second := makeRequest("198.51.100.3")
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request = %d, want 429; body: %s", second.Code, second.Body)
+	}
+
+	third := makeRequest("198.51.100.4")
+	if third.Code != http.StatusNoContent {
+		t.Fatalf("third request = %d, want 204; body: %s", third.Code, third.Body)
+	}
+}
+
+func reverbFormsSchema() forms.Schema {
+	return forms.Schema{
+		Fields: []forms.Field{
+			{Name: "email", Type: forms.FieldTypeEmail, Required: true},
+		},
 	}
 }

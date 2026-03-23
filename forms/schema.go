@@ -23,5 +23,6 @@ type Field struct {
 }
 
 type Schema struct {
-	Fields []Field
+	Fields        []Field
+	HoneypotField string
 }

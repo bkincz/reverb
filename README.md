@@ -203,6 +203,7 @@ reverb.realtime.collection("posts").on("entry.created", (post) => {
 
 ```go
 rb.Form("contact", forms.Schema{
+    HoneypotField: "company",
     Fields: []forms.Field{
         {Name: "name",    Type: forms.FieldTypeText,     Required: true},
         {Name: "email",   Type: forms.FieldTypeEmail,    Required: true},
@@ -218,6 +219,7 @@ GET  /api/admin/forms/{slug}/submissions       paginated submissions (admin)
 ```
 
 Admin routes are only mounted when auth is configured.
+Public submissions are rate-limited per client IP. Behind a reverse proxy, set `TrustedProxies` so Reverb can resolve the real client IP safely.
 
 ---
 
@@ -248,10 +250,15 @@ reverb.Config{
             Secret: "signing-secret",            // X-Reverb-Signature: sha256=<hex>
             Events: []string{"entry.created"},   // empty = all events
             Slugs:  []string{"posts"},            // empty = all collections
+            Timeout:      5 * time.Second,
+            MaxAttempts:  5,
+            RetryBackoff: 500 * time.Millisecond,
         },
     },
 }
 ```
+
+Transient delivery failures (`429`, `5xx`, network timeout) are retried with exponential backoff. Other `4xx` responses are treated as permanent failures.
 
 ---
 
@@ -303,6 +310,8 @@ REVERB_AUTH_ACCESS_TTL
 REVERB_AUTH_REFRESH_TTL
 REVERB_AUTH_COOKIE_SECURE
 REVERB_AUTH_COOKIE_DOMAIN
+REVERB_TRUSTED_PROXIES
+REVERB_FORMS_RATE_LIMIT
 REVERB_CORS_ORIGINS
 REVERB_LOG_MODE          dev | prod
 ```

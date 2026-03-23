@@ -28,6 +28,8 @@ import (
 //	REVERB_AUTH_REFRESH_TTL   duration string, e.g. "168h" (default 168h)
 //	REVERB_AUTH_COOKIE_SECURE true | false
 //	REVERB_AUTH_COOKIE_DOMAIN
+//	REVERB_TRUSTED_PROXIES    comma-separated list of proxy IPs or CIDRs
+//	REVERB_FORMS_RATE_LIMIT   integer requests per minute per client IP
 //	REVERB_CORS_ORIGINS       comma-separated list of origins
 //	REVERB_LOG_MODE           dev | prod
 func FromEnv() (Config, error) {
@@ -81,6 +83,22 @@ func FromEnv() (Config, error) {
 	}
 
 	cfg.Auth.CookieDomain = os.Getenv("REVERB_AUTH_COOKIE_DOMAIN")
+
+	if v := os.Getenv("REVERB_TRUSTED_PROXIES"); v != "" {
+		proxies := strings.Split(v, ",")
+		for i, proxy := range proxies {
+			proxies[i] = strings.TrimSpace(proxy)
+		}
+		cfg.TrustedProxies = proxies
+	}
+
+	if v := os.Getenv("REVERB_FORMS_RATE_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("reverb: REVERB_FORMS_RATE_LIMIT: %w", err)
+		}
+		cfg.Forms.RateLimitPerMinute = n
+	}
 
 	if v := os.Getenv("REVERB_CORS_ORIGINS"); v != "" {
 		origins := strings.Split(v, ",")

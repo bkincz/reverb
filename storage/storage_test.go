@@ -61,6 +61,11 @@ func newTestAdapter(t *testing.T) *local.Adapter {
 
 func multipartUpload(t *testing.T, filename, content, alt string) *http.Request {
 	t.Helper()
+	return multipartUploadBytes(t, filename, []byte(content), alt)
+}
+
+func multipartUploadBytes(t *testing.T, filename string, content []byte, alt string) *http.Request {
+	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
@@ -68,7 +73,7 @@ func multipartUpload(t *testing.T, filename, content, alt string) *http.Request 
 	if err != nil {
 		t.Fatalf("create form file: %v", err)
 	}
-	if _, err := fw.Write([]byte(content)); err != nil {
+	if _, err := fw.Write(content); err != nil {
 		t.Fatalf("write form file: %v", err)
 	}
 
@@ -370,6 +375,30 @@ func TestHandleUpload_SanitisesFilename(t *testing.T) {
 	if _, err := os.Stat("/etc/passwd"); err == nil {
 		// /etc/passwd is a real file on Unix, so existence alone proves nothing.
 		// The important thing is that the upload adapter root was not escaped.
+	}
+}
+
+func TestHandleUpload_UsesSniffedContentType(t *testing.T) {
+	db := newTestDB(t)
+	adapter := newTestAdapter(t)
+
+	handler := wrapAuth(storage.HandleUpload(db, adapter))
+
+	tok := signToken(t, "user-1", "editor")
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x00, 0x00, 0x0d}
+	req := multipartUploadBytes(t, "image.txt", pngHeader, "")
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d â€” body: %s", rr.Code, rr.Body.String())
+	}
+
+	body := decodeJSON(t, rr)
+	if body["mime_type"] != "image/png" {
+		t.Fatalf("expected sniffed mime_type image/png, got %v", body["mime_type"])
 	}
 }
 

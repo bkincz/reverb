@@ -461,3 +461,36 @@ func TestRateLimiter_DifferentIPsIndependent(t *testing.T) {
 		t.Fatalf("IP B should not be blocked; got %d", rr.Code)
 	}
 }
+
+func TestRateLimiter_UsesCustomClientIP(t *testing.T) {
+	mw := auth.NewRateLimiter(1, func(r *http.Request) string {
+		return r.Header.Get("X-Test-IP")
+	})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	reqA1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqA1.Header.Set("X-Test-IP", "tenant-a")
+	rrA1 := httptest.NewRecorder()
+	handler.ServeHTTP(rrA1, reqA1)
+	if rrA1.Code != http.StatusOK {
+		t.Fatalf("first request for tenant-a = %d, want 200", rrA1.Code)
+	}
+
+	reqA2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqA2.Header.Set("X-Test-IP", "tenant-a")
+	rrA2 := httptest.NewRecorder()
+	handler.ServeHTTP(rrA2, reqA2)
+	if rrA2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request for tenant-a = %d, want 429", rrA2.Code)
+	}
+
+	reqB := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqB.Header.Set("X-Test-IP", "tenant-b")
+	rrB := httptest.NewRecorder()
+	handler.ServeHTTP(rrB, reqB)
+	if rrB.Code != http.StatusOK {
+		t.Fatalf("request for tenant-b = %d, want 200", rrB.Code)
+	}
+}

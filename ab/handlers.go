@@ -15,6 +15,13 @@ import (
 	dbmodels "github.com/bkincz/reverb/db/models"
 )
 
+func validateABTestPayload(raw json.RawMessage) error {
+	if _, err := ParseVariants(raw); err != nil {
+		return err
+	}
+	return nil
+}
+
 func HandleAssign(db *bun.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
@@ -94,6 +101,10 @@ func HandleAdminCreate(db *bun.DB) http.HandlerFunc {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "slug and name are required")
 			return
 		}
+		if err := validateABTestPayload(body.Variants); err != nil {
+			api.Error(w, http.StatusBadRequest, api.CodeValidationError, err.Error())
+			return
+		}
 		body.ID = uuid.New().String()
 		body.CreatedAt = time.Now().UTC()
 
@@ -165,6 +176,10 @@ func HandleAdminUpdate(db *bun.DB) http.HandlerFunc {
 			q = q.Set("active = ?", test.Active)
 		}
 		if patch.Variants != nil {
+			if err := validateABTestPayload(*patch.Variants); err != nil {
+				api.Error(w, http.StatusBadRequest, api.CodeValidationError, err.Error())
+				return
+			}
 			test.Variants = *patch.Variants
 			q = q.Set("variants = ?", test.Variants)
 		}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -130,12 +132,9 @@ func validateSubmission(data map[string]any, schema Schema) map[string]string {
 }
 
 func isEmailLike(s string) bool {
-	for _, c := range s {
-		if c == '@' {
-			return true
-		}
-	}
-	return false
+	s = strings.TrimSpace(s)
+	addr, err := mail.ParseAddress(s)
+	return err == nil && addr.Address == s
 }
 
 func containsStr(ss []string, s string) bool {

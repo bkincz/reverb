@@ -26,6 +26,49 @@ type Variant struct {
 	WeightPercent int    `json:"weight_percent"`
 }
 
+func ParseVariants(raw json.RawMessage) ([]Variant, error) {
+	var variants []Variant
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("ab: variants are required")
+	}
+	if err := json.Unmarshal(raw, &variants); err != nil {
+		return nil, fmt.Errorf("ab: parse variants: %w", err)
+	}
+	if err := ValidateVariants(variants); err != nil {
+		return nil, err
+	}
+	return variants, nil
+}
+
+func ValidateVariants(variants []Variant) error {
+	if len(variants) == 0 {
+		return fmt.Errorf("ab: at least one variant is required")
+	}
+
+	seen := make(map[string]struct{}, len(variants))
+	total := 0
+	for i, v := range variants {
+		if v.ID == "" {
+			return fmt.Errorf("ab: variants[%d].id is required", i)
+		}
+		if v.Name == "" {
+			return fmt.Errorf("ab: variants[%d].name is required", i)
+		}
+		if v.WeightPercent <= 0 || v.WeightPercent > 100 {
+			return fmt.Errorf("ab: variants[%d].weight_percent must be between 1 and 100", i)
+		}
+		if _, ok := seen[v.ID]; ok {
+			return fmt.Errorf("ab: duplicate variant id %q", v.ID)
+		}
+		seen[v.ID] = struct{}{}
+		total += v.WeightPercent
+	}
+	if total != 100 {
+		return fmt.Errorf("ab: variant weights must sum to 100")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Assignment
 // ---------------------------------------------------------------------------
@@ -58,12 +101,9 @@ func AssignVariant(ctx context.Context, db *bun.DB, testSlug, visitorID string) 
 		return "", fmt.Errorf("ab: get test: %w", err)
 	}
 
-	var variants []Variant
-	if err := json.Unmarshal(test.Variants, &variants); err != nil {
-		return "", fmt.Errorf("ab: parse variants: %w", err)
-	}
-	if len(variants) == 0 {
-		return "", fmt.Errorf("ab: test has no variants")
+	variants, err := ParseVariants(test.Variants)
+	if err != nil {
+		return "", err
 	}
 
 	variantID := pickVariant(testSlug, visitorID, variants)

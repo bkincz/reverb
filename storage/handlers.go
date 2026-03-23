@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -87,10 +89,10 @@ func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
 		defer file.Close()
 
 		alt := r.FormValue("alt")
-
-		contentType := header.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/octet-stream"
+		sniffed, bodyReader, err := sniffContentType(file)
+		if err != nil {
+			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "could not read uploaded file")
+			return
 		}
 
 		safeName := sanitiseKey(header.Filename)
@@ -98,9 +100,9 @@ func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
 
 		if err := adapter.Upload(ctx, UploadInput{
 			Key:         key,
-			Body:        file,
+			Body:        bodyReader,
 			Size:        header.Size,
-			ContentType: contentType,
+			ContentType: sniffed,
 		}); err != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "upload failed")
 			return
@@ -110,7 +112,7 @@ func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
 			ID:         uuid.NewString(),
 			Filename:   header.Filename,
 			StorageKey: key,
-			MimeType:   contentType,
+			MimeType:   sniffed,
 			Size:       header.Size,
 			Alt:        alt,
 			CreatedAt:  time.Now().UTC(),
@@ -223,4 +225,15 @@ func HandleList(db *bun.DB, adapter Adapter) http.HandlerFunc {
 			"limit": limit,
 		})
 	}
+}
+
+func sniffContentType(file io.Reader) (string, io.Reader, error) {
+	buf := make([]byte, 512)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return "", nil, err
+	}
+	buf = buf[:n]
+	contentType := http.DetectContentType(buf)
+	return contentType, io.MultiReader(bytes.NewReader(buf), file), nil
 }

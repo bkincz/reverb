@@ -4,18 +4,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/uptrace/bun"
 
 	"github.com/bkincz/reverb/api"
 	dbmodels "github.com/bkincz/reverb/db/models"
+	"github.com/bkincz/reverb/internal/realip"
 )
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-func HandleSubmit(db *bun.DB, reg *Registry) http.HandlerFunc {
+func HandleSubmit(db *bun.DB, reg *Registry, clientIPFns ...func(*http.Request) string) http.HandlerFunc {
+	clientIP := realip.RemoteAddr
+	if len(clientIPFns) > 0 && clientIPFns[0] != nil {
+		clientIP = clientIPFns[0]
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
 
@@ -41,9 +48,13 @@ func HandleSubmit(db *bun.DB, reg *Registry) http.HandlerFunc {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "invalid JSON body")
 			return
 		}
+		if schema.HoneypotField != "" && honeypotFilled(data[schema.HoneypotField]) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 
 		metadata := map[string]any{
-			"ip":         r.RemoteAddr,
+			"ip":         clientIP(r),
 			"user_agent": r.Header.Get("User-Agent"),
 		}
 
@@ -57,6 +68,25 @@ func HandleSubmit(db *bun.DB, reg *Registry) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func honeypotFilled(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(x) != ""
+	case bool:
+		return x
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	default:
+		return true
 	}
 }
 

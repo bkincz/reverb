@@ -1,13 +1,13 @@
 package auth
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/bkincz/reverb/api"
+	"github.com/bkincz/reverb/internal/realip"
 )
 
 // ---------------------------------------------------------------------------
@@ -30,12 +30,16 @@ type rateLimiter struct {
 // Rate limiter
 // ---------------------------------------------------------------------------
 
-func NewRateLimiter(requestsPerMinute int) func(http.Handler) http.Handler {
+func NewRateLimiter(requestsPerMinute int, clientIPFns ...func(*http.Request) string) func(http.Handler) http.Handler {
 	capacity := float64(requestsPerMinute)
 	rl := &rateLimiter{
 		buckets:  make(map[string]*bucket),
 		rate:     capacity / 60.0,
 		capacity: capacity,
+	}
+	clientIP := realip.RemoteAddr
+	if len(clientIPFns) > 0 && clientIPFns[0] != nil {
+		clientIP = clientIPFns[0]
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -88,12 +92,3 @@ func (rl *rateLimiter) allow(ip string) bool {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// TODO: add TrustedProxy config to AuthConfig to enable X-Forwarded-For
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}

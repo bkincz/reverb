@@ -22,6 +22,7 @@ import (
 	"github.com/bkincz/reverb/db"
 	dbmodels "github.com/bkincz/reverb/db/models"
 	"github.com/bkincz/reverb/forms"
+	"github.com/bkincz/reverb/internal/realip"
 	"github.com/bkincz/reverb/internal/roles"
 	"github.com/bkincz/reverb/openapi"
 	"github.com/bkincz/reverb/realtime"
@@ -44,10 +45,16 @@ type AuthConfig struct {
 	CookieDomain string
 }
 
+type FormsConfig struct {
+	RateLimitPerMinute int
+}
+
 type Config struct {
-	DB   db.Adapter
-	CORS api.CORSConfig
-	Auth AuthConfig
+	DB             db.Adapter
+	CORS           api.CORSConfig
+	Auth           AuthConfig
+	Forms          FormsConfig
+	TrustedProxies []string
 	// Storage is the file storage adapter. When nil, storage routes are not registered.
 	Storage  storage.Adapter
 	Webhooks []webhook.Config
@@ -82,6 +89,7 @@ type Reverb struct {
 	dispatcher  *webhook.Dispatcher
 	log         *slog.Logger
 	openAPISpec map[string]any
+	clientIP    func(*http.Request) string
 }
 
 func New(cfg Config) *Reverb {
@@ -97,6 +105,9 @@ func New(cfg Config) *Reverb {
 	if cfg.Auth.RefreshTTL == 0 {
 		cfg.Auth.RefreshTTL = 7 * 24 * time.Hour
 	}
+	if cfg.Forms.RateLimitPerMinute == 0 {
+		cfg.Forms.RateLimitPerMinute = 10
+	}
 	logger := newLogger(cfg.LogMode)
 	return &Reverb{
 		cfg:        cfg,
@@ -106,6 +117,7 @@ func New(cfg Config) *Reverb {
 		broker:     realtime.NewBroker(),
 		dispatcher: webhook.NewDispatcher(cfg.Webhooks, logger),
 		log:        logger,
+		clientIP:   realip.RemoteAddr,
 	}
 }
 
@@ -201,6 +213,12 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 		}
 	}
 
+	resolver, err := realip.New(r.cfg.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("reverb: TrustedProxies: %w", err)
+	}
+	r.clientIP = resolver.ClientIP
+
 	target.Use(api.CORS(r.cfg.CORS))
 
 	target.Handle("GET /_reverb/health", http.HandlerFunc(r.handleHealth))
@@ -233,7 +251,7 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 		realtime.HandleStream(r.db, r.broker, r.registry, r.authCfg))
 
 	if r.cfg.Auth.Secret != "" {
-		rl := auth.NewRateLimiter(10)
+		rl := auth.NewRateLimiter(10, r.clientIP)
 
 		target.Handle("GET /api/admin/collections", r.adminMiddleware(collections.HandleAdminList(r.registry)))
 		target.Handle("POST /_reverb/auth/register", rl(auth.Register(r.authCfg)))
@@ -265,7 +283,8 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 	target.Handle("GET /api/ab/{slug}/variant", r.parseAuthMiddleware(ab.HandleAssign(r.db)))
 	target.Handle("POST /api/ab/{slug}/convert", r.parseAuthMiddleware(ab.HandleConvert(r.db)))
 
-	target.Handle("POST /api/forms/{slug}", forms.HandleSubmit(r.db, r.forms))
+	formsRateLimit := auth.NewRateLimiter(r.cfg.Forms.RateLimitPerMinute, r.clientIP)
+	target.Handle("POST /api/forms/{slug}", formsRateLimit(forms.HandleSubmit(r.db, r.forms, r.clientIP)))
 
 	r.openAPISpec = openapi.BuildSpec(r.registry, r.cfg.Auth.Secret != "", r.store != nil)
 	target.Handle("GET /_reverb/openapi.json", http.HandlerFunc(r.handleOpenAPI))
@@ -310,6 +329,12 @@ func (r *Reverb) validateConfig() error {
 	if r.cfg.Auth.AccessTTL > 0 && r.cfg.Auth.RefreshTTL > 0 && r.cfg.Auth.RefreshTTL < r.cfg.Auth.AccessTTL {
 		return fmt.Errorf("reverb: Auth.RefreshTTL must not be shorter than Auth.AccessTTL")
 	}
+	if r.cfg.Forms.RateLimitPerMinute < 0 {
+		return fmt.Errorf("reverb: Forms.RateLimitPerMinute must not be negative")
+	}
+	if _, err := realip.New(r.cfg.TrustedProxies); err != nil {
+		return fmt.Errorf("reverb: TrustedProxies: %w", err)
+	}
 	for _, entry := range r.registry.All() {
 		if err := validateCollectionSchema(entry.Slug(), entry.Schema()); err != nil {
 			return err
@@ -322,6 +347,15 @@ func (r *Reverb) validateConfig() error {
 		u, err := url.Parse(wh.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("reverb: Webhooks[%d].URL must be an http or https URL", i)
+		}
+		if wh.Timeout < 0 {
+			return fmt.Errorf("reverb: Webhooks[%d].Timeout must not be negative", i)
+		}
+		if wh.MaxAttempts < 0 {
+			return fmt.Errorf("reverb: Webhooks[%d].MaxAttempts must not be negative", i)
+		}
+		if wh.RetryBackoff < 0 {
+			return fmt.Errorf("reverb: Webhooks[%d].RetryBackoff must not be negative", i)
 		}
 	}
 	return nil

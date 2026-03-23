@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+const (
+	defaultWorkerCount = 16
+	defaultQueueSize   = 256
+	defaultTimeout     = 10 * time.Second
+	defaultMaxAttempts = 3
+	defaultBackoff     = 500 * time.Millisecond
+)
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -31,6 +39,13 @@ type Config struct {
 	// Slugs filters which collection slugs trigger this webhook.
 	// Empty means all collections.
 	Slugs []string
+	// Timeout bounds a single delivery attempt. Zero uses the default.
+	Timeout time.Duration
+	// MaxAttempts controls total delivery attempts, including the first try.
+	// Zero uses the default.
+	MaxAttempts int
+	// RetryBackoff is the base delay between retries. Zero uses the default.
+	RetryBackoff time.Duration
 }
 
 type Payload struct {
@@ -48,13 +63,68 @@ type Dispatcher struct {
 	configs []Config
 	client  *http.Client
 	log     *slog.Logger
+	jobs    chan dispatchJob
 }
 
 func NewDispatcher(configs []Config, log *slog.Logger) *Dispatcher {
-	return &Dispatcher{
+	return newDispatcher(configs, log, defaultQueueSize, defaultWorkerCount, &http.Client{Timeout: defaultTimeout})
+}
+
+type dispatchJob struct {
+	cfg     Config
+	payload Payload
+}
+
+func newDispatcher(configs []Config, log *slog.Logger, queueSize, workerCount int, client *http.Client) *Dispatcher {
+	if queueSize < 1 {
+		queueSize = 1
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+
+	d := &Dispatcher{
 		configs: configs,
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  client,
 		log:     log,
+		jobs:    make(chan dispatchJob, queueSize),
+	}
+	for range workerCount {
+		go d.worker()
+	}
+	return d
+}
+
+func (d *Dispatcher) worker() {
+	for job := range d.jobs {
+		d.fire(job.cfg, job.payload)
+	}
+}
+
+func (d *Dispatcher) warn(msg string, args ...any) {
+	if d.log != nil {
+		d.log.Warn(msg, args...)
+	}
+}
+
+func (d *Dispatcher) err(msg string, args ...any) {
+	if d.log != nil {
+		d.log.Error(msg, args...)
+	}
+}
+
+func (d *Dispatcher) enqueue(cfg Config, payload Payload) {
+	select {
+	case d.jobs <- dispatchJob{cfg: cfg, payload: payload}:
+	default:
+		d.warn("webhook: queue full, dropping event",
+			"url", cfg.URL,
+			"event", payload.Event,
+			"slug", payload.Slug,
+		)
 	}
 }
 
@@ -69,7 +139,7 @@ func (d *Dispatcher) Dispatch(slug, event string, entry map[string]any, id strin
 		if !matches(cfg.Slugs, slug) || !matches(cfg.Events, event) {
 			continue
 		}
-		go d.fire(cfg, payload)
+		d.enqueue(cfg, payload)
 	}
 }
 
@@ -78,19 +148,73 @@ func (d *Dispatcher) Dispatch(slug, event string, entry map[string]any, id strin
 // ---------------------------------------------------------------------------
 
 func (d *Dispatcher) fire(cfg Config, payload Payload) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		d.log.Error("webhook: marshal payload", "error", err, "url", cfg.URL)
-		return
+	attempts := cfg.MaxAttempts
+	if attempts < 1 {
+		attempts = defaultMaxAttempts
+	}
+	backoff := cfg.RetryBackoff
+	if backoff <= 0 {
+		backoff = defaultBackoff
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		retry, err := d.deliver(cfg, payload)
+		if err == nil {
+			return
+		}
+		if !retry {
+			d.warn("webhook: delivery failed without retry",
+				"url", cfg.URL,
+				"attempt", attempt,
+				"max_attempts", attempts,
+				"error", err,
+				"event", payload.Event,
+				"slug", payload.Slug,
+			)
+			return
+		}
+		if attempt == attempts {
+			d.err("webhook: delivery exhausted retries",
+				"url", cfg.URL,
+				"attempts", attempts,
+				"error", err,
+				"event", payload.Event,
+				"slug", payload.Slug,
+			)
+			return
+		}
+
+		delay := retryDelay(backoff, attempt)
+		d.warn("webhook: retrying delivery",
+			"url", cfg.URL,
+			"attempt", attempt,
+			"next_attempt", attempt+1,
+			"delay", delay.String(),
+			"error", err,
+			"event", payload.Event,
+			"slug", payload.Slug,
+		)
+		time.Sleep(delay)
+	}
+}
+
+func (d *Dispatcher) deliver(cfg Config, payload Payload) (bool, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		d.log.Error("webhook: build request", "error", err, "url", cfg.URL)
-		return
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "reverb-webhook/1")
@@ -100,21 +224,21 @@ func (d *Dispatcher) fire(cfg Config, payload Payload) {
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		d.log.Error("webhook: deliver", "error", err, "url", cfg.URL)
-		return
+		return true, fmt.Errorf("deliver: %w", err)
 	}
+	defer resp.Body.Close()
 
 	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		d.log.Warn("webhook: non-2xx response",
-			"url", cfg.URL,
-			"status", resp.StatusCode,
-			"event", payload.Event,
-			"slug", payload.Slug,
-		)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return false, nil
 	}
+
+	err = fmt.Errorf("non-2xx response: status=%d", resp.StatusCode)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return true, err
+	}
+	return false, err
 }
 
 // sign returns "sha256=<hex>" HMAC-SHA256 of body using secret.
@@ -134,4 +258,21 @@ func matches(filter []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func retryDelay(base time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := base
+	for range attempt - 1 {
+		if delay >= 8*time.Second {
+			return 8 * time.Second
+		}
+		delay *= 2
+	}
+	if delay > 8*time.Second {
+		return 8 * time.Second
+	}
+	return delay
 }

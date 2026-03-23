@@ -1,0 +1,324 @@
+# Reverb
+
+A self-hosted backend module for Go. Auth, collections, file storage, SSE streams, and more as a single embeddable package. Drop it into any `net/http` server.
+
+**Requirements:** Go 1.24+
+
+```bash
+go get github.com/bkincz/reverb
+```
+
+---
+
+## Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+
+    "github.com/bkincz/reverb"
+    "github.com/bkincz/reverb/collections"
+    "github.com/bkincz/reverb/db/sqlite"
+)
+
+func main() {
+    rb := reverb.New(reverb.Config{
+        DB: sqlite.New("data.db"),
+        Auth: reverb.AuthConfig{
+            Secret: "your-secret-at-least-32-characters-long",
+        },
+    })
+
+    rb.Collection("posts", collections.Schema{
+        Access: collections.Access{
+            Read:   collections.Public,
+            Write:  collections.Role("editor"),
+            Delete: collections.Role("admin"),
+        },
+        Fields: []collections.Field{
+            {Name: "title", Type: collections.TypeText, Required: true},
+            {Name: "body",  Type: collections.TypeRichText},
+        },
+    })
+
+    mux := http.NewServeMux()
+    if err := rb.Mount(context.Background(), reverb.ForServer(mux.Handle, func(...func(http.Handler) http.Handler) {})); err != nil {
+        log.Fatal(err)
+    }
+    log.Fatal(http.ListenAndServe(":8080", mux))
+}
+```
+
+---
+
+## Features
+
+- JWT auth: register, login, refresh, logout, `me`
+- Role hierarchy: `admin > editor > viewer > public`
+- Collections: define a schema, get full CRUD with field-level permissions
+- Draft / published / archived workflow with scheduled publishing
+- Slug management: auto-generated from any field, human-readable lookups
+- `RichText` fields: ProseMirror JSON stored, HTML rendered on read
+- `SEOMeta` fields: title, description, og:image, canonical, structured data
+- File storage: local filesystem or any S3-compatible service (R2, MinIO, Backblaze)
+- Real-time: SSE streams per collection with field-level filtering per subscriber
+- A/B testing: deterministic variant assignment, conversion tracking
+- Form builder: define schema via `rb.Form()`, submissions stored in DB
+- Webhooks: HMAC-signed POST on collection events, filterable by slug and event type
+- Type generation: `reverb gen types` outputs TypeScript interfaces from live schema
+- OpenAPI spec at `GET /_reverb/openapi.json`
+- Health endpoint at `GET /_reverb/health`
+
+---
+
+## Databases
+
+```go
+import "github.com/bkincz/reverb/db/sqlite"
+import "github.com/bkincz/reverb/db/postgres"
+import "github.com/bkincz/reverb/db/mysql"
+
+reverb.Config{ DB: sqlite.New("data.db") }
+reverb.Config{ DB: postgres.New("postgres://...") }
+reverb.Config{ DB: mysql.New("user:pass@tcp(host)/db?parseTime=true") }
+```
+
+---
+
+## Collections
+
+```go
+rb.Collection("posts", collections.Schema{
+    Access: collections.Access{
+        Read:   collections.Public,
+        Write:  collections.Role("editor"),
+        Delete: collections.Role("admin"),
+    },
+    Fields: []collections.Field{
+        {Name: "title",          Type: collections.TypeText,     Required: true},
+        {Name: "body",           Type: collections.TypeRichText},
+        {Name: "published_at",   Type: collections.TypeDate},
+        {Name: "internal_notes", Type: collections.TypeText,     Access: collections.Role("admin")},
+    },
+    SlugSource: "title", // auto-generates human-readable slugs from this field
+})
+```
+
+**Endpoints mounted automatically:**
+
+```
+GET    /api/collections/{slug}        list  (?status=&page=&limit=&sort=field:dir)
+POST   /api/collections/{slug}        create (body: {status?, data: {...}})
+GET    /api/collections/{slug}/{id}   get (or ?slug=human-slug)
+PATCH  /api/collections/{slug}/{id}   update (body: {status?, publish_at?, data: {...}})
+DELETE /api/collections/{slug}/{id}   delete
+GET    /api/admin/collections         schema introspection (admin only)
+```
+
+Restricted fields are absent from responses entirely, not nulled.
+
+---
+
+## Auth
+
+```
+POST /_reverb/auth/register    {email, password}
+POST /_reverb/auth/login       {email, password}  -> access token + refresh cookie
+POST /_reverb/auth/refresh     rotates refresh token
+POST /_reverb/auth/logout
+GET  /_reverb/auth/me
+```
+
+Protect your own routes:
+
+```go
+mux.Handle("GET /dashboard", rb.RequireAuth()(dashboardHandler))
+mux.Handle("DELETE /posts/{id}", rb.RequireRole("editor")(deleteHandler))
+
+// ParseAuth injects claims when a token is present but does not block public access.
+mux.Handle("GET /feed", rb.ParseAuth()(feedHandler))
+```
+
+---
+
+## Storage
+
+```go
+import "github.com/bkincz/reverb/storage/local"
+import "github.com/bkincz/reverb/storage/s3"
+
+// Local filesystem
+reverb.Config{ Storage: local.New("./uploads", "/_reverb/storage/files") }
+
+// S3-compatible (AWS, R2, MinIO, Backblaze)
+store, err := s3.New(s3.Config{
+    Bucket:   "my-bucket",
+    Region:   "auto",
+    Endpoint: "https://...r2.cloudflarestorage.com",
+    AccessKey: "...",
+    SecretKey: "...",
+    BaseURL:   "https://cdn.example.com/my-bucket",
+})
+if err != nil {
+    panic(err)
+}
+reverb.Config{ Storage: store }
+```
+
+```
+POST   /_reverb/storage/upload    multipart, 32 MB cap
+DELETE /_reverb/storage/{id}
+GET    /_reverb/storage
+```
+
+---
+
+## Real-time
+
+```
+GET /_reverb/realtime/collections/{slug}    SSE stream
+```
+
+Clients authenticate via `Authorization: Bearer <token>` header or `?ticket=` (short-lived token from `POST /_reverb/realtime/ticket`). Events: `entry.created`, `entry.updated`, `entry.deleted`.
+
+**TypeScript SDK:**
+
+```ts
+import { createClient } from "@reverb/sdk";
+
+const reverb = createClient({ baseURL: "http://localhost:8080" });
+
+reverb.realtime.collection("posts").on("entry.created", (post) => {
+    console.log(post);
+});
+```
+
+---
+
+## Forms
+
+```go
+rb.Form("contact", forms.Schema{
+    Fields: []forms.Field{
+        {Name: "name",    Type: forms.FieldTypeText,     Required: true},
+        {Name: "email",   Type: forms.FieldTypeEmail,    Required: true},
+        {Name: "message", Type: forms.FieldTypeTextarea},
+    },
+})
+```
+
+```
+POST /api/forms/{slug}                         submit
+GET  /api/admin/forms                          list definitions (admin)
+GET  /api/admin/forms/{slug}/submissions       paginated submissions (admin)
+```
+
+Admin routes are only mounted when auth is configured.
+
+---
+
+## A/B Testing
+
+```
+GET  /api/ab/{slug}/variant?visitor_id=    assign (or retrieve) a variant
+POST /api/ab/{slug}/convert                {visitor_id, event_name}
+
+GET    /api/admin/ab              list tests
+POST   /api/admin/ab              create test ({name, slug, variants, active})
+GET    /api/admin/ab/{slug}
+PATCH  /api/admin/ab/{slug}
+DELETE /api/admin/ab/{slug}
+```
+
+Variant assignment is deterministic. The same visitor always gets the same variant.
+
+---
+
+## Webhooks
+
+```go
+reverb.Config{
+    Webhooks: []webhook.Config{
+        {
+            URL:    "https://example.com/hook",
+            Secret: "signing-secret",            // X-Reverb-Signature: sha256=<hex>
+            Events: []string{"entry.created"},   // empty = all events
+            Slugs:  []string{"posts"},            // empty = all collections
+        },
+    },
+}
+```
+
+---
+
+## Scheduled Publishing
+
+Set `publish_at` on any entry. Reverb flips it to `published` automatically:
+
+```
+PATCH /api/collections/posts/{id}
+{"publish_at": "2025-06-01T09:00:00Z"}
+```
+
+Fire a callback on publish (e.g. trigger a static site rebuild):
+
+```go
+reverb.Config{
+    OnPublish: func(ctx context.Context, collectionSlug, entryID string) {
+        triggerRebuild()
+    },
+}
+```
+
+---
+
+## Type Generation
+
+```bash
+reverb gen types --driver sqlite --db data.db --out reverb.d.ts
+reverb clean deprecated --driver sqlite --db data.db
+```
+
+---
+
+## Config from Environment
+
+```go
+cfg, err := reverb.FromEnv()
+if err != nil {
+    panic(err)
+}
+rb := reverb.New(cfg)
+```
+
+```
+REVERB_DB_DRIVER       sqlite | postgres | mysql
+REVERB_DB_DSN
+REVERB_AUTH_SECRET
+REVERB_AUTH_ACCESS_TTL
+REVERB_AUTH_REFRESH_TTL
+REVERB_AUTH_COOKIE_SECURE
+REVERB_AUTH_COOKIE_DOMAIN
+REVERB_CORS_ORIGINS
+REVERB_LOG_MODE          dev | prod
+```
+
+---
+
+## Echo Integration
+
+```go
+rb.Mount(ctx, reverb.ForServer(s.Handle, s.Use))
+```
+
+`ForServer` adapts any server that has `Handle(pattern, handler)` and `Use(middleware...)` methods.
+
+---
+
+## License
+
+MIT

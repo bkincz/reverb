@@ -147,10 +147,7 @@ func CreateEntry(
 
 	if schema.SlugSource != "" {
 		if title, ok := data[schema.SlugSource].(string); ok && title != "" {
-			if _, err := upsertSlug(ctx, db, collectionSlug, e.ID, generateSlug(title)); err != nil {
-				// Non-fatal: slug is a convenience feature, entry already persisted.
-				_ = err
-			}
+			_, _ = upsertSlug(ctx, db, collectionSlug, e.ID, generateSlug(title))
 		}
 	}
 
@@ -225,10 +222,7 @@ func UpdateEntry(
 
 	if schema.SlugSource != "" {
 		if title, ok := existing[schema.SlugSource].(string); ok && title != "" {
-			if _, err := upsertSlug(ctx, db, collectionSlug, e.ID, generateSlug(title)); err != nil {
-				// Non-fatal: slug is a convenience feature, entry already persisted.
-				_ = err
-			}
+			_, _ = upsertSlug(ctx, db, collectionSlug, e.ID, generateSlug(title))
 		}
 	}
 
@@ -249,10 +243,7 @@ func DeleteEntry(ctx context.Context, db *bun.DB, collectionSlug, id string) err
 		return fmt.Errorf("collections: delete entry: %w", err)
 	}
 
-	if err := deleteSlug(ctx, db, id); err != nil {
-		// Non-fatal: entry is already deleted.
-		_ = err
-	}
+	_ = deleteSlug(ctx, db, id)
 
 	return nil
 }
@@ -289,7 +280,6 @@ func entryToMap(e dbmodels.CollectionEntry, role string, schema Schema) (map[str
 		return nil, fmt.Errorf("collections: unmarshal entry data: %w", err)
 	}
 
-	// Strip fields the role cannot read.
 	for _, f := range schema.Fields {
 		rule := f.Access
 		if rule == nil {
@@ -300,7 +290,6 @@ func entryToMap(e dbmodels.CollectionEntry, role string, schema Schema) (map[str
 		}
 	}
 
-	// Render RichText fields to HTML and expose alongside the raw JSON.
 	for _, f := range schema.Fields {
 		if f.Type != TypeRichText {
 			continue

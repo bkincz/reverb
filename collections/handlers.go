@@ -167,7 +167,7 @@ func HandleCreate(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 			Status string         `json:"status"`
 			Data   map[string]any `json:"data"`
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "invalid JSON body")
 			return
@@ -222,7 +222,7 @@ func HandleUpdate(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 			PublishAt *time.Time     `json:"publish_at"`
 			Data      map[string]any `json:"data"`
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "invalid JSON body")
 			return
@@ -292,15 +292,8 @@ func HandleDelete(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 // HandleAdminList
 // ---------------------------------------------------------------------------
 
-// HandleAdminList requires admin role.
 func HandleAdminList(reg *Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		claims, ok := auth.ClaimsFromContext(r.Context())
-		if !ok || claims == nil || claims.Role != "admin" {
-			api.Error(w, http.StatusForbidden, api.CodeForbidden, "admin role required")
-			return
-		}
-
 		all := reg.All()
 		out := make([]map[string]any, 0, len(all))
 		for _, e := range all {
@@ -310,6 +303,6 @@ func HandleAdminList(reg *Registry) http.HandlerFunc {
 			})
 		}
 
-		api.JSON(w, http.StatusOK, out)
+		api.JSON(w, http.StatusOK, map[string]any{"data": out})
 	}
 }

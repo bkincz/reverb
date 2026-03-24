@@ -109,7 +109,6 @@ func validateSubmission(data map[string]any, schema Schema) map[string]string {
 		case FieldTypeNumber:
 			switch v.(type) {
 			case float64, int, int64:
-				// ok
 			default:
 				errs[f.Name] = "must be a number"
 			}

@@ -32,16 +32,6 @@ func HandleSubmit(db *bun.DB, reg *Registry, clientIPFns ...func(*http.Request) 
 			return
 		}
 
-		fd, err := FindDefinition(r.Context(), db, slug)
-		if err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
-			return
-		}
-		if fd == nil {
-			api.Error(w, http.StatusNotFound, api.CodeNotFound, "form not found")
-			return
-		}
-
 		var data map[string]any
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -50,6 +40,16 @@ func HandleSubmit(db *bun.DB, reg *Registry, clientIPFns ...func(*http.Request) 
 		}
 		if schema.HoneypotField != "" && honeypotFilled(data[schema.HoneypotField]) {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		fd, err := FindDefinition(r.Context(), db, slug)
+		if err != nil {
+			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
+			return
+		}
+		if fd == nil {
+			api.Error(w, http.StatusNotFound, api.CodeNotFound, "form not found")
 			return
 		}
 

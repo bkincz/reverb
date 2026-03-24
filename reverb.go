@@ -248,7 +248,7 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 	target.Handle("PATCH /api/collections/{slug}/{id}", r.parseAuthMiddleware(collections.HandleUpdate(r.db, r.registry, publish)))
 	target.Handle("DELETE /api/collections/{slug}/{id}", r.parseAuthMiddleware(collections.HandleDelete(r.db, r.registry, publish)))
 	target.Handle("GET /_reverb/realtime/collections/{slug}",
-		realtime.HandleStream(r.db, r.broker, r.registry, r.authCfg))
+		realtime.HandleStream(r.broker, r.registry, r.authCfg))
 
 	if r.cfg.Auth.Secret != "" {
 		rl := auth.NewRateLimiter(10, r.clientIP)

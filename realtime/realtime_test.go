@@ -179,7 +179,7 @@ func TestHandleStream_ConnectedEvent(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		realtime.HandleStream(nil, broker, reg, auth.Config{}).ServeHTTP(w, req)
+		realtime.HandleStream(broker, reg, auth.Config{}).ServeHTTP(w, req)
 		close(done)
 	}()
 
@@ -209,7 +209,7 @@ func TestHandleStream_PublishedEventAppearsInStream(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		realtime.HandleStream(nil, broker, reg, auth.Config{}).ServeHTTP(w, req)
+		realtime.HandleStream(broker, reg, auth.Config{}).ServeHTTP(w, req)
 		close(done)
 	}()
 
@@ -240,7 +240,7 @@ func TestHandleStream_UnknownSlug404(t *testing.T) {
 	req.SetPathValue("slug", "missing")
 	w := httptest.NewRecorder()
 
-	realtime.HandleStream(nil, broker, reg, auth.Config{}).ServeHTTP(w, req)
+	realtime.HandleStream(broker, reg, auth.Config{}).ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
@@ -259,7 +259,7 @@ func TestHandleStream_ContextCancellationClosesStream(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		realtime.HandleStream(nil, broker, reg, auth.Config{}).ServeHTTP(w, req)
+		realtime.HandleStream(broker, reg, auth.Config{}).ServeHTTP(w, req)
 		close(done)
 	}()
 

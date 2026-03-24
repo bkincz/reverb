@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/uptrace/bun"
-
 	"github.com/bkincz/reverb/api"
 	"github.com/bkincz/reverb/auth"
 	"github.com/bkincz/reverb/collections"
@@ -17,7 +15,7 @@ import (
 // Handler
 // ---------------------------------------------------------------------------
 
-func HandleStream(db *bun.DB, broker *Broker, reg *collections.Registry, authCfg auth.Config) http.HandlerFunc {
+func HandleStream(broker *Broker, reg *collections.Registry, authCfg auth.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
 		e, ok := reg.Get(slug)

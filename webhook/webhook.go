@@ -104,13 +104,13 @@ func (d *Dispatcher) worker() {
 	}
 }
 
-func (d *Dispatcher) warn(msg string, args ...any) {
+func (d *Dispatcher) logWarn(msg string, args ...any) {
 	if d.log != nil {
 		d.log.Warn(msg, args...)
 	}
 }
 
-func (d *Dispatcher) err(msg string, args ...any) {
+func (d *Dispatcher) logError(msg string, args ...any) {
 	if d.log != nil {
 		d.log.Error(msg, args...)
 	}
@@ -120,7 +120,7 @@ func (d *Dispatcher) enqueue(cfg Config, payload Payload) {
 	select {
 	case d.jobs <- dispatchJob{cfg: cfg, payload: payload}:
 	default:
-		d.warn("webhook: queue full, dropping event",
+		d.logWarn("webhook: queue full, dropping event",
 			"url", cfg.URL,
 			"event", payload.Event,
 			"slug", payload.Slug,
@@ -163,7 +163,7 @@ func (d *Dispatcher) fire(cfg Config, payload Payload) {
 			return
 		}
 		if !retry {
-			d.warn("webhook: delivery failed without retry",
+			d.logWarn("webhook: delivery failed without retry",
 				"url", cfg.URL,
 				"attempt", attempt,
 				"max_attempts", attempts,
@@ -174,7 +174,7 @@ func (d *Dispatcher) fire(cfg Config, payload Payload) {
 			return
 		}
 		if attempt == attempts {
-			d.err("webhook: delivery exhausted retries",
+			d.logError("webhook: delivery exhausted retries",
 				"url", cfg.URL,
 				"attempts", attempts,
 				"error", err,
@@ -185,7 +185,7 @@ func (d *Dispatcher) fire(cfg Config, payload Payload) {
 		}
 
 		delay := retryDelay(backoff, attempt)
-		d.warn("webhook: retrying delivery",
+		d.logWarn("webhook: retrying delivery",
 			"url", cfg.URL,
 			"attempt", attempt,
 			"next_attempt", attempt+1,
@@ -241,7 +241,6 @@ func (d *Dispatcher) deliver(cfg Config, payload Payload) (bool, error) {
 	return false, err
 }
 
-// sign returns "sha256=<hex>" HMAC-SHA256 of body using secret.
 func sign(body []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)

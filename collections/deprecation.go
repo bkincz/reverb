@@ -20,8 +20,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type storedField struct {
-	Name string    `json:"name"`
-	Type FieldType `json:"type"`
+	Name     string    `json:"name"`
+	Type     FieldType `json:"type"`
+	Required bool      `json:"required,omitempty"`
+	Options  []string  `json:"options,omitempty"`
+	MinRole  string    `json:"min_role,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +44,13 @@ func checkCollection(ctx context.Context, db *bun.DB, e Entry, log *slog.Logger)
 	liveFields := make([]storedField, 0, len(e.schema.Fields))
 	liveIndex := map[string]struct{}{}
 	for _, f := range e.schema.Fields {
-		liveFields = append(liveFields, storedField{Name: f.Name, Type: f.Type})
+		liveFields = append(liveFields, storedField{
+			Name:     f.Name,
+			Type:     f.Type,
+			Required: f.Required,
+			Options:  f.Options,
+			MinRole:  f.Access.RequiredRole(),
+		})
 		liveIndex[f.Name] = struct{}{}
 	}
 

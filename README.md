@@ -111,15 +111,21 @@ rb.Collection("posts", collections.Schema{
 **Endpoints mounted automatically:**
 
 ```
-GET    /api/collections/{slug}        list  (?status=&page=&limit=&sort=field:dir)
-POST   /api/collections/{slug}        create (body: {status?, data: {...}})
-GET    /api/collections/{slug}/{id}   get (or ?slug=human-slug)
-PATCH  /api/collections/{slug}/{id}   update (body: {status?, publish_at?, data: {...}})
-DELETE /api/collections/{slug}/{id}   delete
-GET    /api/admin/collections         schema introspection (admin only)
+GET    /api/collections/{slug}                    list  (?status=&page=&limit=&sort=field:dir)
+POST   /api/collections/{slug}                    create (body: {status?, data: {...}})
+GET    /api/collections/{slug}/{id}               get (or ?slug=human-slug)
+PATCH  /api/collections/{slug}/{id}               update (body: {status?, publish_at?, data: {...}})
+DELETE /api/collections/{slug}/{id}               delete (404 if entry not found)
+GET    /api/admin/collections                     schema introspection (admin only)
+GET    /api/collections/{slug}/{id}/versions      list version history (admin only)
+GET    /api/collections/{slug}/{id}/versions/{n}  get a specific version snapshot (admin only)
 ```
 
+Version history is recorded on every update when the schema has `Versioned: true`. Each snapshot captures the state **before** the update was applied.
+
 Restricted fields are absent from responses entirely, not nulled.
+
+**Schema validation** — `Mount()` returns an error at startup if a collection schema has empty field names, duplicate field names, or a `SlugSource` that doesn't reference a known field.
 
 ---
 
@@ -259,6 +265,19 @@ reverb.Config{
 ```
 
 Transient delivery failures (`429`, `5xx`, network timeout) are retried with exponential backoff. Other `4xx` responses are treated as permanent failures.
+
+---
+
+## Preview
+
+Issue a short-lived (10-minute) signed token that lets an unauthenticated client read a single entry in its current state, regardless of `status`. Useful for headless CMS draft previews.
+
+```
+POST /_reverb/preview/token    {collection, entry_id}  -> {token}   (requires auth)
+GET  /_reverb/preview?token=   returns entry filtered to public-readable fields
+```
+
+The token is HMAC-signed with a key derived from `Auth.Secret`. Fields that require a role above `public` are stripped from the preview response, and `TypePassword` fields are never returned.
 
 ---
 

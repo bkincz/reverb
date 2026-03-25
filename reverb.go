@@ -24,7 +24,9 @@ import (
 	"github.com/bkincz/reverb/forms"
 	"github.com/bkincz/reverb/internal/realip"
 	"github.com/bkincz/reverb/internal/roles"
+	"github.com/bkincz/reverb/jobs"
 	"github.com/bkincz/reverb/openapi"
+	"github.com/bkincz/reverb/preview"
 	"github.com/bkincz/reverb/realtime"
 	"github.com/bkincz/reverb/storage"
 	"github.com/bkincz/reverb/webhook"
@@ -36,8 +38,11 @@ const version = "0.1.0"
 // Types
 // ---------------------------------------------------------------------------
 
+type JobsConfig struct {
+	Workers int
+}
+
 type AuthConfig struct {
-	// Auth routes are not registered when this is empty.
 	Secret       string
 	AccessTTL    time.Duration
 	RefreshTTL   time.Duration
@@ -54,6 +59,7 @@ type Config struct {
 	CORS           api.CORSConfig
 	Auth           AuthConfig
 	Forms          FormsConfig
+	Jobs           JobsConfig
 	TrustedProxies []string
 	// Storage is the file storage adapter. When nil, storage routes are not registered.
 	Storage  storage.Adapter
@@ -85,11 +91,14 @@ type Reverb struct {
 	registry    *collections.Registry
 	forms       *forms.Registry
 	store       storage.Adapter
+	imageProc   storage.ImageProcessor
 	broker      *realtime.Broker
 	dispatcher  *webhook.Dispatcher
+	queue       *jobs.Queue
 	log         *slog.Logger
 	openAPISpec map[string]any
 	clientIP    func(*http.Request) string
+	resolver    *realip.Resolver
 }
 
 func New(cfg Config) *Reverb {
@@ -165,6 +174,13 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 	}
 	r.db = bunDB
 
+	workers := r.cfg.Jobs.Workers
+	if workers <= 0 {
+		workers = 5
+	}
+	r.queue = jobs.New(r.db, r.log, workers)
+	r.queue.Start(ctx)
+
 	if err := db.Migrate(ctx, r.db); err != nil {
 		return err
 	}
@@ -213,11 +229,7 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 		}
 	}
 
-	resolver, err := realip.New(r.cfg.TrustedProxies)
-	if err != nil {
-		return fmt.Errorf("reverb: TrustedProxies: %w", err)
-	}
-	r.clientIP = resolver.ClientIP
+	r.clientIP = r.resolver.ClientIP
 
 	target.Use(api.CORS(r.cfg.CORS))
 
@@ -268,11 +280,19 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 		target.Handle("DELETE /api/admin/ab/{slug}", r.adminMiddleware(ab.HandleAdminDelete(r.db)))
 		target.Handle("GET /api/admin/forms", r.adminMiddleware(forms.HandleAdminListForms(r.db)))
 		target.Handle("GET /api/admin/forms/{slug}/submissions", r.adminMiddleware(forms.HandleAdminListSubmissions(r.db)))
+		target.Handle("GET /api/collections/{slug}/{id}/versions",
+			r.adminMiddleware(collections.HandleListVersions(r.db, r.registry)))
+		target.Handle("GET /api/collections/{slug}/{id}/versions/{version}",
+			r.adminMiddleware(collections.HandleGetVersion(r.db, r.registry)))
+		target.Handle("POST /_reverb/preview/token",
+			r.authMiddleware(preview.HandleIssue(r.cfg.Auth.Secret)))
+		target.Handle("GET /_reverb/preview",
+			preview.HandlePreview(r.db, r.registry, r.cfg.Auth.Secret))
 	}
 
 	if r.store != nil {
 		target.Handle("GET /_reverb/storage", r.authMiddleware(storage.HandleList(r.db, r.store)))
-		target.Handle("POST /_reverb/storage/upload", r.authMiddleware(storage.HandleUpload(r.db, r.store)))
+		target.Handle("POST /_reverb/storage/upload", r.authMiddleware(storage.HandleUpload(r.db, r.store, r.imageProc)))
 		target.Handle("DELETE /_reverb/storage/{id}", r.authMiddleware(storage.HandleDelete(r.db, r.store)))
 
 		if fs, ok := r.store.(storage.FileServer); ok {
@@ -288,6 +308,11 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 
 	r.openAPISpec = openapi.BuildSpec(r.registry, r.cfg.Auth.Secret != "", r.store != nil)
 	target.Handle("GET /_reverb/openapi.json", http.HandlerFunc(r.handleOpenAPI))
+
+	go func() {
+		<-ctx.Done()
+		r.dispatcher.Close()
+	}()
 
 	r.log.Info("reverb mounted", "version", version)
 	return nil
@@ -307,6 +332,22 @@ func (r *Reverb) RequireRole(role string) func(http.Handler) http.Handler {
 
 func (r *Reverb) ParseAuth() func(http.Handler) http.Handler {
 	return auth.ParseAuth(r.authCfg)
+}
+
+func (r *Reverb) SetImageProcessor(p storage.ImageProcessor) {
+	r.imageProc = p
+}
+
+func (r *Reverb) RegisterJob(name string, fn func(ctx context.Context, payload []byte) error, opts jobs.JobOptions) {
+	r.queue.Register(name, fn, opts)
+}
+
+func (r *Reverb) Enqueue(ctx context.Context, name string, payload any) error {
+	return r.queue.Enqueue(ctx, name, payload)
+}
+
+func (r *Reverb) EnqueueAt(ctx context.Context, name string, payload any, runAt time.Time) error {
+	return r.queue.EnqueueAt(ctx, name, payload, runAt)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,9 +373,11 @@ func (r *Reverb) validateConfig() error {
 	if r.cfg.Forms.RateLimitPerMinute < 0 {
 		return fmt.Errorf("reverb: Forms.RateLimitPerMinute must not be negative")
 	}
-	if _, err := realip.New(r.cfg.TrustedProxies); err != nil {
+	resolver, err := realip.New(r.cfg.TrustedProxies)
+	if err != nil {
 		return fmt.Errorf("reverb: TrustedProxies: %w", err)
 	}
+	r.resolver = resolver
 	for _, entry := range r.registry.All() {
 		if err := validateCollectionSchema(entry.Slug(), entry.Schema()); err != nil {
 			return err
@@ -421,11 +464,28 @@ func validateCollectionSchema(slug string, schema collections.Schema) error {
 	if err := validateAccessRule(schema.Access.Delete, slug, "delete access"); err != nil {
 		return err
 	}
-	for _, field := range schema.Fields {
+
+	names := make(map[string]struct{}, len(schema.Fields))
+	for i, field := range schema.Fields {
+		if field.Name == "" {
+			return fmt.Errorf("reverb: collection %q field[%d] has an empty name", slug, i)
+		}
+		if _, seen := names[field.Name]; seen {
+			return fmt.Errorf("reverb: collection %q has duplicate field name %q", slug, field.Name)
+		}
+		names[field.Name] = struct{}{}
+
 		if err := validateAccessRule(field.Access, slug, fmt.Sprintf("field %q access", field.Name)); err != nil {
 			return err
 		}
 	}
+
+	if schema.SlugSource != "" {
+		if _, ok := names[schema.SlugSource]; !ok {
+			return fmt.Errorf("reverb: collection %q SlugSource %q does not reference a known field", slug, schema.SlugSource)
+		}
+	}
+
 	return nil
 }
 

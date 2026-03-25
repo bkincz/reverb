@@ -2,8 +2,12 @@ package collections
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
+
+var reColor = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -102,6 +106,75 @@ func validateField(f Field, val any) error {
 
 	case TypeJSON:
 		// Any value is acceptable for raw JSON fields.
+
+	case TypeArray:
+		items, ok := val.([]any)
+		if !ok {
+			return fmt.Errorf("must be an array")
+		}
+		if f.ItemSchema != nil {
+			var errs []string
+			for i, elem := range items {
+				if err := validateField(*f.ItemSchema, elem); err != nil {
+					errs = append(errs, fmt.Sprintf("element[%d]: %s", i, err.Error()))
+				}
+			}
+			if len(errs) > 0 {
+				return fmt.Errorf("%s", strings.Join(errs, "; "))
+			}
+		}
+
+	case TypePassword:
+		s, ok := val.(string)
+		if !ok || s == "" {
+			return fmt.Errorf("must be a non-empty string")
+		}
+
+	case TypeColor:
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("must be a string")
+		}
+		if !reColor.MatchString(s) {
+			return fmt.Errorf("must be a hex color (#RGB or #RRGGBB)")
+		}
+
+	case TypePoint:
+		m, ok := val.(map[string]any)
+		if !ok {
+			return fmt.Errorf("must be an object with lat and lng")
+		}
+		lat, latOK := m["lat"].(float64)
+		lng, lngOK := m["lng"].(float64)
+		if !latOK || !lngOK {
+			return fmt.Errorf("must contain numeric lat and lng fields")
+		}
+		if lat < -90 || lat > 90 {
+			return fmt.Errorf("lat must be between -90 and 90")
+		}
+		if lng < -180 || lng > 180 {
+			return fmt.Errorf("lng must be between -180 and 180")
+		}
+
+	case TypeLocale:
+		m, ok := val.(map[string]any)
+		if !ok {
+			return fmt.Errorf("must be an object keyed by locale code")
+		}
+		if f.WrappedType != nil {
+			var errs []string
+			for locale, v := range m {
+				if err := validateField(*f.WrappedType, v); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %s", locale, err.Error()))
+				}
+			}
+			if len(errs) > 0 {
+				return fmt.Errorf("%s", strings.Join(errs, "; "))
+			}
+		}
+
+	case TypeJoin:
+		// Virtual field — never sent by clients, never validated.
 	}
 
 	return nil

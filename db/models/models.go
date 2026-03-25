@@ -83,8 +83,29 @@ type Media struct {
 	StorageKey string    `bun:"storage_key,notnull"`
 	MimeType   string    `bun:"mime_type,notnull"`
 	Size       int64     `bun:"size,notnull"`
-	Alt        string    `bun:"alt,nullzero"`
-	CreatedAt  time.Time `bun:"created_at,notnull"`
+	Alt        string          `bun:"alt,nullzero"`
+	Width      int             `bun:"width,nullzero"`
+	Height     int             `bun:"height,nullzero"`
+	Variants   json.RawMessage `bun:"variants,type:json,nullzero"`
+	CreatedAt  time.Time       `bun:"created_at,notnull"`
+}
+
+// ---------------------------------------------------------------------------
+// Versions
+// ---------------------------------------------------------------------------
+
+type EntryVersion struct {
+	bun.BaseModel `bun:"table:reverb_versions,alias:ev"`
+
+	ID             string          `bun:"id,pk,type:varchar(36)"`
+	CollectionSlug string          `bun:"collection_slug,notnull"`
+	EntryID        string          `bun:"entry_id,notnull"`
+	Version        int             `bun:"version,notnull"`
+	Data           json.RawMessage `bun:"data,type:json,notnull"`
+	Status         string          `bun:"status,notnull"`
+	CreatedByID    string          `bun:"created_by,nullzero"`
+	Label          string          `bun:"label,nullzero"`
+	CreatedAt      time.Time       `bun:"created_at,notnull"`
 }
 
 // ---------------------------------------------------------------------------
@@ -145,4 +166,23 @@ type FormSubmission struct {
 	Data      json.RawMessage `bun:"data,type:json,notnull"`
 	Metadata  json.RawMessage `bun:"metadata,type:json,nullzero"`
 	CreatedAt time.Time       `bun:"created_at,notnull"`
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+type Job struct {
+	bun.BaseModel `bun:"table:reverb_jobs,alias:j"`
+
+	ID          string          `bun:"id,pk,type:varchar(36)"`
+	Name        string          `bun:"name,notnull"`
+	Payload     json.RawMessage `bun:"payload,type:json,notnull"`
+	Status      string          `bun:"status,notnull,default:'pending'"`
+	Attempts    int             `bun:"attempts,notnull,default:0"`
+	MaxAttempts int             `bun:"max_attempts,notnull,default:3"`
+	LastError   string          `bun:"last_error,nullzero"`
+	RunAt       time.Time       `bun:"run_at,notnull"`
+	CreatedAt   time.Time       `bun:"created_at,notnull"`
+	UpdatedAt   time.Time       `bun:"updated_at,notnull"`
 }

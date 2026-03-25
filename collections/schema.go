@@ -1,6 +1,10 @@
 package collections
 
-import "github.com/bkincz/reverb/internal/roles"
+import (
+	"encoding/json"
+
+	"github.com/bkincz/reverb/internal/roles"
+)
 
 // ---------------------------------------------------------------------------
 // Field types
@@ -19,6 +23,12 @@ const (
 	TypeSelect   FieldType = "select"
 	TypeJSON     FieldType = "json"
 	TypeSEOMeta  FieldType = "seometa"
+	TypeArray    FieldType = "array"
+	TypePassword FieldType = "password"
+	TypeColor    FieldType = "color"
+	TypePoint    FieldType = "point"
+	TypeLocale   FieldType = "locale"
+	TypeJoin     FieldType = "join"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,6 +59,15 @@ func (a *AccessRule) Allowed(role string) bool {
 	return roles.Allowed(role, a.minRole)
 }
 
+func (a *AccessRule) MarshalJSON() ([]byte, error) {
+	if a == nil || a.minRole == "" {
+		return []byte(`{}`), nil
+	}
+	return json.Marshal(struct {
+		MinRole string `json:"min_role"`
+	}{MinRole: a.minRole})
+}
+
 // ---------------------------------------------------------------------------
 // Schema types
 // ---------------------------------------------------------------------------
@@ -60,16 +79,21 @@ type Access struct {
 }
 
 type Field struct {
-	Name       string
-	Type       FieldType
-	Required   bool
-	Access     *AccessRule
-	Options    []string
-	Collection string
+	Name        string
+	Type        FieldType
+	Required    bool
+	Access      *AccessRule
+	Options     []string
+	Collection  string
+	ItemSchema  *Field
+	TargetSlug  string
+	JoinField   string
+	WrappedType *Field
 }
 
 type Schema struct {
 	Access     Access
 	Fields     []Field
 	SlugSource string
+	Versioned  bool
 }

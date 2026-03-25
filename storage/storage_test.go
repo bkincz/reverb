@@ -321,7 +321,7 @@ func TestHandleUpload_ReturnsCreated(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t)
 
-	handler := wrapAuth(storage.HandleUpload(db, adapter))
+	handler := wrapAuth(storage.HandleUpload(db, adapter, nil))
 
 	tok := signToken(t, "user-1", "editor")
 	req := multipartUpload(t, "photo.jpg", "fake jpeg", "a nice photo")
@@ -353,7 +353,7 @@ func TestHandleUpload_SanitisesFilename(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t)
 
-	handler := wrapAuth(storage.HandleUpload(db, adapter))
+	handler := wrapAuth(storage.HandleUpload(db, adapter, nil))
 
 	tok := signToken(t, "user-1", "editor")
 	req := multipartUpload(t, "../../../etc/passwd", "content", "")
@@ -382,7 +382,7 @@ func TestHandleUpload_UsesSniffedContentType(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t)
 
-	handler := wrapAuth(storage.HandleUpload(db, adapter))
+	handler := wrapAuth(storage.HandleUpload(db, adapter, nil))
 
 	tok := signToken(t, "user-1", "editor")
 	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x00, 0x00, 0x0d}
@@ -406,7 +406,7 @@ func TestHandleUpload_NoAuthHeader_Rejected(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t)
 
-	handler := wrapAuth(storage.HandleUpload(db, adapter))
+	handler := wrapAuth(storage.HandleUpload(db, adapter, nil))
 
 	req := multipartUpload(t, "photo.jpg", "data", "")
 	rr := httptest.NewRecorder()
@@ -421,7 +421,7 @@ func TestHandleUpload_MissingFileField(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t)
 
-	handler := wrapAuth(storage.HandleUpload(db, adapter))
+	handler := wrapAuth(storage.HandleUpload(db, adapter, nil))
 
 	tok := signToken(t, "user-1", "editor")
 

@@ -36,15 +36,31 @@ type Adapter interface {
 }
 
 // ---------------------------------------------------------------------------
-// Optional interfaces
+// Image processing
 // ---------------------------------------------------------------------------
 
-// FileServer is implemented by adapters that need to serve files locally.
-// Adapters backed by a CDN (S3, R2, etc.) do not implement this — their
-// URL() method already points at a public host.
+type StoredVariant struct {
+	Key    string `json:"key"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+type ProcessedVariant struct {
+	Name        string
+	Data        []byte
+	Width       int
+	Height      int
+	ContentType string
+}
+
+type ImageProcessor interface {
+	ProcessImage(ctx context.Context, original []byte, mime string) (variants []ProcessedVariant, origWidth, origHeight int, err error)
+}
+
+// ---------------------------------------------------------------------------
+// Optional interfaces
+// ---------------------------------------------------------------------------
 type FileServer interface {
 	FileServer() http.Handler
-	// FileServePath returns the path prefix the handler must be mounted at,
-	// e.g. "/_reverb/storage/files/".
 	FileServePath() string
 }

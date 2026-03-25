@@ -15,6 +15,18 @@ import (
 	dbmodels "github.com/bkincz/reverb/db/models"
 )
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func abError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrTestNotFound) {
+		api.Error(w, http.StatusNotFound, api.CodeNotFound, "test not found or inactive")
+		return
+	}
+	api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "internal error")
+}
+
 func validateABTestPayload(raw json.RawMessage) error {
 	if _, err := ParseVariants(raw); err != nil {
 		return err
@@ -38,7 +50,7 @@ func HandleAssign(db *bun.DB) http.HandlerFunc {
 
 		variantID, err := AssignVariant(r.Context(), db, slug, visitorID)
 		if err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
+			abError(w, err)
 			return
 		}
 
@@ -54,7 +66,7 @@ func HandleConvert(db *bun.DB) http.HandlerFunc {
 			VisitorID string `json:"visitor_id"`
 			EventName string `json:"event_name"`
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 32<<10) // 32 KB
+		r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "invalid JSON body")
 			return
@@ -70,7 +82,7 @@ func HandleConvert(db *bun.DB) http.HandlerFunc {
 		}
 
 		if err := RecordConversion(r.Context(), db, slug, body.VisitorID, body.EventName); err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
+			abError(w, err)
 			return
 		}
 

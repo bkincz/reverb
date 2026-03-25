@@ -48,14 +48,18 @@ func runOnce(ctx context.Context, db *bun.DB, log *slog.Logger, publish func(slu
 
 	now := time.Now().UTC()
 	for _, e := range entries {
-		_, err := db.NewUpdate().
+		res, err := db.NewUpdate().
 			Model((*dbmodels.CollectionEntry)(nil)).
 			Set("status = ?", "published").
 			Set("updated_at = ?", now).
 			Where("id = ?", e.ID).
+			Where("status = ?", "draft").
 			Exec(ctx)
 		if err != nil {
 			log.Error("scheduler: publish entry", "id", e.ID, "error", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
 			continue
 		}
 

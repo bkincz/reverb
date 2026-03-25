@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -43,38 +44,65 @@ func sanitiseKey(raw string) string {
 // Response shape
 // ---------------------------------------------------------------------------
 
+type VariantResponse struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
 type mediaResponse struct {
-	ID        string    `json:"id"`
-	Filename  string    `json:"filename"`
-	URL       string    `json:"url"`
-	MimeType  string    `json:"mime_type"`
-	Size      int64     `json:"size"`
-	Alt       string    `json:"alt"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string                     `json:"id"`
+	Filename  string                     `json:"filename"`
+	URL       string                     `json:"url"`
+	MimeType  string                     `json:"mime_type"`
+	Size      int64                      `json:"size"`
+	Alt       string                     `json:"alt"`
+	Width     int                        `json:"width,omitempty"`
+	Height    int                        `json:"height,omitempty"`
+	Variants  map[string]VariantResponse `json:"variants,omitempty"`
+	CreatedAt time.Time                  `json:"created_at"`
 }
 
 func toResponse(m *dbmodels.Media, adapter Adapter) mediaResponse {
-	return mediaResponse{
+	resp := mediaResponse{
 		ID:        m.ID,
 		Filename:  m.Filename,
 		URL:       adapter.URL(m.StorageKey),
 		MimeType:  m.MimeType,
 		Size:      m.Size,
 		Alt:       m.Alt,
+		Width:     m.Width,
+		Height:    m.Height,
 		CreatedAt: m.CreatedAt,
 	}
+
+	if len(m.Variants) > 0 {
+		var stored map[string]StoredVariant
+		if err := json.Unmarshal(m.Variants, &stored); err == nil && len(stored) > 0 {
+			resp.Variants = make(map[string]VariantResponse, len(stored))
+			for name, sv := range stored {
+				resp.Variants[name] = VariantResponse{
+					URL:    adapter.URL(sv.Key),
+					Width:  sv.Width,
+					Height: sv.Height,
+				}
+			}
+		}
+	}
+
+	return resp
 }
 
 // ---------------------------------------------------------------------------
 // HandleUpload — POST /_reverb/storage/upload
 // ---------------------------------------------------------------------------
 
-func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
+func HandleUpload(db *bun.DB, adapter Adapter, proc ImageProcessor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
-		r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32 MB
+		r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "could not parse multipart form")
@@ -89,7 +117,14 @@ func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
 		defer file.Close()
 
 		alt := r.FormValue("alt")
-		sniffed, bodyReader, err := sniffContentType(file)
+
+		rawBytes, err := io.ReadAll(file)
+		if err != nil {
+			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "could not read uploaded file")
+			return
+		}
+
+		sniffed, bodyReader, err := sniffContentType(bytes.NewReader(rawBytes))
 		if err != nil {
 			api.Error(w, http.StatusBadRequest, api.CodeValidationError, "could not read uploaded file")
 			return
@@ -120,6 +155,46 @@ func HandleUpload(db *bun.DB, adapter Adapter) http.HandlerFunc {
 
 		if claims, ok := auth.ClaimsFromContext(ctx); ok && claims != nil {
 			record.UserID = claims.UserID
+		}
+
+		if proc != nil && strings.HasPrefix(sniffed, "image/") {
+			variants, origWidth, origHeight, procErr := proc.ProcessImage(ctx, rawBytes, sniffed)
+			if procErr != nil {
+				slog.Warn("reverb: storage: image processing failed", "key", key, "err", procErr)
+			} else if len(variants) > 0 {
+				stored := make(map[string]StoredVariant, len(variants))
+				for _, v := range variants {
+					variantKey := key + "__" + v.Name
+					uploadErr := adapter.Upload(ctx, UploadInput{
+						Key:         variantKey,
+						Body:        bytes.NewReader(v.Data),
+						Size:        int64(len(v.Data)),
+						ContentType: v.ContentType,
+					})
+					if uploadErr != nil {
+						slog.Warn("reverb: storage: upload variant failed", "key", variantKey, "err", uploadErr)
+						continue
+					}
+					stored[v.Name] = StoredVariant{
+						Key:    variantKey,
+						Width:  v.Width,
+						Height: v.Height,
+					}
+				}
+
+				if len(stored) > 0 {
+					variantsJSON, marshalErr := json.Marshal(stored)
+					if marshalErr == nil {
+						record.Variants = variantsJSON
+					}
+				}
+
+				record.Width = origWidth
+				record.Height = origHeight
+			} else if origWidth > 0 {
+				record.Width = origWidth
+				record.Height = origHeight
+			}
 		}
 
 		if _, err := db.NewInsert().Model(record).Exec(ctx); err != nil {
@@ -169,7 +244,18 @@ func HandleDelete(db *bun.DB, adapter Adapter) http.HandlerFunc {
 		}
 
 		if err := adapter.Delete(ctx, record.StorageKey); err != nil {
-			log.Printf("reverb: storage: orphaned key %s: %v", record.StorageKey, err)
+			slog.Warn("reverb: storage: orphaned key after delete", "key", record.StorageKey, "err", err)
+		}
+
+		if len(record.Variants) > 0 {
+			var stored map[string]StoredVariant
+			if jsonErr := json.Unmarshal(record.Variants, &stored); jsonErr == nil {
+				for _, sv := range stored {
+					if delErr := adapter.Delete(ctx, sv.Key); delErr != nil {
+						slog.Warn("reverb: storage: orphaned variant key after delete", "key", sv.Key, "err", delErr)
+					}
+				}
+			}
 		}
 
 		api.JSON(w, http.StatusOK, map[string]string{"status": "ok"})

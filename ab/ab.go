@@ -70,6 +70,12 @@ func ValidateVariants(variants []Variant) error {
 }
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+var ErrTestNotFound = errors.New("ab: test not found or inactive")
+
+// ---------------------------------------------------------------------------
 // Assignment
 // ---------------------------------------------------------------------------
 
@@ -96,7 +102,7 @@ func AssignVariant(ctx context.Context, db *bun.DB, testSlug, visitorID string) 
 		Limit(1).
 		Scan(ctx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("ab: test not found or inactive: %s", testSlug)
+			return "", ErrTestNotFound
 		}
 		return "", fmt.Errorf("ab: get test: %w", err)
 	}

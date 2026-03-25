@@ -24,7 +24,7 @@ const claimsKey contextKey = iota
 func RequireAuth(cfg Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenStr := bearerToken(r)
+			tokenStr := BearerToken(r)
 			if tokenStr == "" {
 				api.Error(w, http.StatusUnauthorized, api.CodeUnauthorized, "missing or malformed authorization header")
 				return
@@ -74,7 +74,7 @@ func RequireRole(cfg Config, role string) func(http.Handler) http.Handler {
 func ParseAuth(cfg Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenStr := bearerToken(r)
+			tokenStr := BearerToken(r)
 			if tokenStr == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -99,7 +99,7 @@ func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 	return claims, ok
 }
 
-func bearerToken(r *http.Request) string {
+func BearerToken(r *http.Request) string {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
 		return ""

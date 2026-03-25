@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
 
 	"github.com/bkincz/reverb/api"
 	"github.com/bkincz/reverb/auth"
+	"github.com/bkincz/reverb/internal/roles"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,32 @@ func handleValidationOrInternal(w http.ResponseWriter, err error) {
 	api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
 }
 
+func readOptionsFromRequest(r *http.Request) ReadOptions {
+	q := r.URL.Query()
+
+	locale := q.Get("locale")
+	if locale == "" {
+		if al := r.Header.Get("Accept-Language"); al != "" {
+			tag := strings.SplitN(al, ",", 2)[0]
+			if idx := strings.IndexByte(tag, ';'); idx >= 0 {
+				tag = tag[:idx]
+			}
+			locale = strings.TrimSpace(tag)
+		}
+	}
+
+	var populate []string
+	if raw := q.Get("populate"); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				populate = append(populate, p)
+			}
+		}
+	}
+
+	return ReadOptions{Locale: locale, Populate: populate}
+}
+
 // ---------------------------------------------------------------------------
 // HandleList
 // ---------------------------------------------------------------------------
@@ -71,6 +99,13 @@ func HandleList(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFunc
 		page, _ := strconv.Atoi(q.Get("page"))
 		limit, _ := strconv.Atoi(q.Get("limit"))
 
+		if page < 1 {
+			page = 1
+		}
+		if limit < 1 || limit > 100 {
+			limit = 20
+		}
+
 		params := ListParams{
 			Status: q.Get("status"),
 			Page:   page,
@@ -78,17 +113,12 @@ func HandleList(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFunc
 			Sort:   q.Get("sort"),
 		}
 
-		entries, total, err := ListEntries(r.Context(), db, slug, params, role, schema)
+		opts := readOptionsFromRequest(r)
+		opts.Reg = reg
+		entries, total, err := ListEntries(r.Context(), db, slug, params, role, schema, opts)
 		if err != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
 			return
-		}
-
-		if params.Page < 1 {
-			params.Page = 1
-		}
-		if params.Limit < 1 || params.Limit > 100 {
-			params.Limit = 20
 		}
 
 		api.JSON(w, http.StatusOK, map[string]any{
@@ -117,8 +147,11 @@ func HandleGet(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFunc 
 			return
 		}
 
+		opts := readOptionsFromRequest(r)
+		opts.Reg = reg
+
 		if entrySlug := r.URL.Query().Get("slug"); entrySlug != "" {
-			entry, err := GetEntryBySlug(r.Context(), db, slug, entrySlug, role, schema)
+			entry, err := GetEntryBySlug(r.Context(), db, slug, entrySlug, role, schema, opts)
 			if err != nil {
 				api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
 				return
@@ -132,7 +165,7 @@ func HandleGet(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFunc 
 		}
 
 		id := r.PathValue("id")
-		entry, err := GetEntry(r.Context(), db, slug, id, role, schema)
+		entry, err := GetEntry(r.Context(), db, slug, id, role, schema, opts)
 		if err != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
 			return
@@ -189,7 +222,7 @@ func HandleCreate(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 			}
 		}
 
-		filtered, mapErr := entryToMap(*entry, role, schema)
+		filtered, mapErr := entryToMap(r.Context(), db, *entry, role, schema, ReadOptions{})
 		if mapErr != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, mapErr.Error())
 			return
@@ -232,7 +265,12 @@ func HandleUpdate(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 			patch = map[string]any{}
 		}
 
-		result, err := UpdateEntry(r.Context(), db, slug, id, patch, body.Status, body.PublishAt, role, schema)
+		var userID string
+		if claims, ok := auth.ClaimsFromContext(r.Context()); ok && claims != nil {
+			userID = claims.UserID
+		}
+
+		result, err := UpdateEntry(r.Context(), db, slug, id, patch, body.Status, body.PublishAt, role, schema, userID)
 		if err != nil {
 			handleValidationOrInternal(w, err)
 			return
@@ -248,7 +286,7 @@ func HandleUpdate(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 			}
 		}
 
-		filtered, mapErr := entryToMap(*result, role, schema)
+		filtered, mapErr := entryToMap(r.Context(), db, *result, role, schema, ReadOptions{})
 		if mapErr != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, mapErr.Error())
 			return
@@ -276,6 +314,10 @@ func HandleDelete(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 
 		id := r.PathValue("id")
 		if err := DeleteEntry(r.Context(), db, slug, id); err != nil {
+			if errors.Is(err, ErrEntryNotFound) {
+				api.Error(w, http.StatusNotFound, api.CodeNotFound, "entry not found")
+				return
+			}
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, err.Error())
 			return
 		}
@@ -294,6 +336,12 @@ func HandleDelete(db *bun.DB, reg *Registry, publish PublishFunc) http.HandlerFu
 
 func HandleAdminList(reg *Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		role := roleFromRequest(r)
+		if !roles.Allowed(role, "admin") {
+			api.Error(w, http.StatusForbidden, api.CodeForbidden, "insufficient role")
+			return
+		}
+
 		all := reg.All()
 		out := make([]map[string]any, 0, len(all))
 		for _, e := range all {

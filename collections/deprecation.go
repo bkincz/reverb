@@ -20,11 +20,15 @@ import (
 // ---------------------------------------------------------------------------
 
 type storedField struct {
-	Name     string    `json:"name"`
-	Type     FieldType `json:"type"`
-	Required bool      `json:"required,omitempty"`
-	Options  []string  `json:"options,omitempty"`
-	MinRole  string    `json:"min_role,omitempty"`
+	Name        string       `json:"name"`
+	Type        FieldType    `json:"type"`
+	Required    bool         `json:"required,omitempty"`
+	Options     []string     `json:"options,omitempty"`
+	MinRole     string       `json:"min_role,omitempty"`
+	ItemSchema  *storedField `json:"item_schema,omitempty"`
+	TargetSlug  string       `json:"target_slug,omitempty"`
+	JoinField   string       `json:"join_field,omitempty"`
+	WrappedType *storedField `json:"wrapped_type,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -40,17 +44,32 @@ func CheckDeprecations(ctx context.Context, db *bun.DB, reg *Registry, log *slog
 	return nil
 }
 
+func fieldToStored(f Field) storedField {
+	sf := storedField{
+		Name:       f.Name,
+		Type:       f.Type,
+		Required:   f.Required,
+		Options:    f.Options,
+		MinRole:    f.Access.RequiredRole(),
+		TargetSlug: f.TargetSlug,
+		JoinField:  f.JoinField,
+	}
+	if f.ItemSchema != nil {
+		s := fieldToStored(*f.ItemSchema)
+		sf.ItemSchema = &s
+	}
+	if f.WrappedType != nil {
+		s := fieldToStored(*f.WrappedType)
+		sf.WrappedType = &s
+	}
+	return sf
+}
+
 func checkCollection(ctx context.Context, db *bun.DB, e Entry, log *slog.Logger) error {
 	liveFields := make([]storedField, 0, len(e.schema.Fields))
 	liveIndex := map[string]struct{}{}
 	for _, f := range e.schema.Fields {
-		liveFields = append(liveFields, storedField{
-			Name:     f.Name,
-			Type:     f.Type,
-			Required: f.Required,
-			Options:  f.Options,
-			MinRole:  f.Access.RequiredRole(),
-		})
+		liveFields = append(liveFields, fieldToStored(f))
 		liveIndex[f.Name] = struct{}{}
 	}
 

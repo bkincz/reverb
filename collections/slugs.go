@@ -87,7 +87,7 @@ func deleteSlug(ctx context.Context, db *bun.DB, entryID string) error {
 	return nil
 }
 
-func GetEntryBySlug(ctx context.Context, db *bun.DB, collectionSlug, entrySlug, role string, schema Schema) (map[string]any, error) {
+func GetEntryBySlug(ctx context.Context, db *bun.DB, collectionSlug, entrySlug, role string, schema Schema, opts ReadOptions) (map[string]any, error) {
 	var cs dbmodels.CollectionSlug
 	err := db.NewSelect().
 		Model(&cs).
@@ -101,7 +101,7 @@ func GetEntryBySlug(ctx context.Context, db *bun.DB, collectionSlug, entrySlug, 
 		}
 		return nil, fmt.Errorf("collections: get slug: %w", err)
 	}
-	return GetEntry(ctx, db, collectionSlug, cs.EntryID, role, schema)
+	return GetEntry(ctx, db, collectionSlug, cs.EntryID, role, schema, opts)
 }
 
 func isUniqueViolation(err error) bool {

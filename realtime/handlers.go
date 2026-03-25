@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/bkincz/reverb/api"
 	"github.com/bkincz/reverb/auth"
@@ -88,8 +87,7 @@ func resolveRole(r *http.Request, authCfg auth.Config) (string, error) {
 		return "public", nil
 	}
 
-	tokenStr := bearerToken(r)
-	if tokenStr != "" {
+	if tokenStr := auth.BearerToken(r); tokenStr != "" {
 		claims, err := auth.VerifyAccess(authCfg.Tokens, tokenStr)
 		if err != nil {
 			return "", fmt.Errorf("realtime: verify token: %w", err)
@@ -105,23 +103,7 @@ func resolveRole(r *http.Request, authCfg auth.Config) (string, error) {
 		return claims.Role, nil
 	}
 
-	if token := r.URL.Query().Get("token"); token != "" {
-		claims, err := auth.VerifyAccess(authCfg.Tokens, token)
-		if err != nil {
-			return "", fmt.Errorf("realtime: verify token: %w", err)
-		}
-		return claims.Role, nil
-	}
-
 	return "", nil
-}
-
-func bearerToken(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(header, "Bearer ")
 }
 
 func writeEvent(w http.ResponseWriter, event Event, role string, schema collections.Schema) error {

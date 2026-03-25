@@ -80,15 +80,6 @@ func bearerRequest(method, path, body, token string) *http.Request {
 	return r
 }
 
-func injectClaims(r *http.Request, role string) *http.Request {
-	// Sign a token and set it on the request, letting the auth package parse it.
-	// For tests we inject the claims directly via a minimal context helper by
-	// routing through a RequireAuth-style middleware, but it's simpler to just
-	// build the JWT and let the handler extract it.
-	_ = role
-	return r
-}
-
 const testSecret = "test-secret-key-at-least-32-bytes!!"
 
 var testTokenCfg = auth.TokenConfig{
@@ -194,7 +185,7 @@ func TestCreateAndGetEntry(t *testing.T) {
 		t.Fatal("expected non-empty ID")
 	}
 
-	got, err := collections.GetEntry(ctx, db, "posts", entry.ID, "editor", blogSchema)
+	got, err := collections.GetEntry(ctx, db, "posts", entry.ID, "editor", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("get entry: %v", err)
 	}
@@ -223,7 +214,7 @@ func TestListEntries_Pagination(t *testing.T) {
 	entries, total, err := collections.ListEntries(ctx, db, "posts", collections.ListParams{
 		Page:  1,
 		Limit: 2,
-	}, "editor", blogSchema)
+	}, "editor", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -237,7 +228,7 @@ func TestListEntries_Pagination(t *testing.T) {
 	page2, _, err := collections.ListEntries(ctx, db, "posts", collections.ListParams{
 		Page:  2,
 		Limit: 2,
-	}, "editor", blogSchema)
+	}, "editor", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("list page 2: %v", err)
 	}
@@ -259,7 +250,7 @@ func TestListEntries_Sort(t *testing.T) {
 
 	entries, _, err := collections.ListEntries(ctx, db, "posts", collections.ListParams{
 		Sort: "created_at:asc",
-	}, "editor", blogSchema)
+	}, "editor", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("list asc: %v", err)
 	}
@@ -269,7 +260,7 @@ func TestListEntries_Sort(t *testing.T) {
 
 	_, _, err = collections.ListEntries(ctx, db, "posts", collections.ListParams{
 		Sort: "injected_field:asc; DROP TABLE--",
-	}, "editor", blogSchema)
+	}, "editor", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("invalid sort should not error: %v", err)
 	}
@@ -291,7 +282,7 @@ func TestFieldPermissionFiltering(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	adminView, err := collections.GetEntry(ctx, db, "posts", entry.ID, "admin", blogSchema)
+	adminView, err := collections.GetEntry(ctx, db, "posts", entry.ID, "admin", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("get as admin: %v", err)
 	}
@@ -300,7 +291,7 @@ func TestFieldPermissionFiltering(t *testing.T) {
 		t.Fatal("admin should see secret field")
 	}
 
-	viewerView, err := collections.GetEntry(ctx, db, "posts", entry.ID, "viewer", blogSchema)
+	viewerView, err := collections.GetEntry(ctx, db, "posts", entry.ID, "viewer", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("get as viewer: %v", err)
 	}
@@ -349,7 +340,7 @@ func TestValidation_UnknownFieldsDropped(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	got, err := collections.GetEntry(ctx, db, "posts", entry.ID, "admin", blogSchema)
+	got, err := collections.GetEntry(ctx, db, "posts", entry.ID, "admin", blogSchema, collections.ReadOptions{})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

@@ -64,6 +64,7 @@ type Dispatcher struct {
 	client  *http.Client
 	log     *slog.Logger
 	jobs    chan dispatchJob
+	done    chan struct{}
 }
 
 func NewDispatcher(configs []Config, log *slog.Logger) *Dispatcher {
@@ -91,6 +92,7 @@ func newDispatcher(configs []Config, log *slog.Logger, queueSize, workerCount in
 		client:  client,
 		log:     log,
 		jobs:    make(chan dispatchJob, queueSize),
+		done:    make(chan struct{}),
 	}
 	for range workerCount {
 		go d.worker()
@@ -98,9 +100,21 @@ func newDispatcher(configs []Config, log *slog.Logger, queueSize, workerCount in
 	return d
 }
 
+func (d *Dispatcher) Close() {
+	close(d.done)
+}
+
 func (d *Dispatcher) worker() {
-	for job := range d.jobs {
-		d.fire(job.cfg, job.payload)
+	for {
+		select {
+		case job, ok := <-d.jobs:
+			if !ok {
+				return
+			}
+			d.fire(job.cfg, job.payload)
+		case <-d.done:
+			return
+		}
 	}
 }
 
@@ -194,7 +208,11 @@ func (d *Dispatcher) fire(cfg Config, payload Payload) {
 			"event", payload.Event,
 			"slug", payload.Slug,
 		)
-		time.Sleep(delay)
+		select {
+		case <-time.After(delay):
+		case <-d.done:
+			return
+		}
 	}
 }
 

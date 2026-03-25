@@ -42,6 +42,13 @@ func NewRateLimiter(requestsPerMinute int, clientIPFns ...func(*http.Request) st
 		clientIP = clientIPFns[0]
 	}
 
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		for range ticker.C {
+			rl.evictStale(10 * time.Minute)
+		}
+	}()
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIP(r)
@@ -89,6 +96,13 @@ func (rl *rateLimiter) allow(ip string) bool {
 	return true
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+func (rl *rateLimiter) evictStale(maxAge time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for ip, b := range rl.buckets {
+		if b.lastRefil.Before(cutoff) {
+			delete(rl.buckets, ip)
+		}
+	}
+}

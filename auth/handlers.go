@@ -23,6 +23,7 @@ import (
 type Config struct {
 	DB           *bun.DB
 	Tokens       TokenConfig
+	AccessCookieName string
 	CookieName   string
 	CookieSecure bool
 	CookieDomain string
@@ -79,6 +80,8 @@ func Register(cfg Config) http.HandlerFunc {
 			return
 		}
 
+		issueAccessCookie(cfg, w, accessToken)
+
 		if err := issueRefreshCookie(r.Context(), cfg, w, user.ID); err != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not issue refresh token")
 			return
@@ -118,6 +121,8 @@ func Login(cfg Config) http.HandlerFunc {
 			return
 		}
 
+		issueAccessCookie(cfg, w, accessToken)
+
 		if err := issueRefreshCookie(r.Context(), cfg, w, user.ID); err != nil {
 			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not issue refresh token")
 			return
@@ -139,47 +144,21 @@ func Refresh(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		hashed := HashRefresh(cookie.Value)
-
-		rt := new(db.RefreshToken)
-		err = cfg.DB.NewSelect().Model(rt).Where("token_hash = ?", hashed).Scan(r.Context())
+		accessToken, _, err := refreshSession(r.Context(), cfg, w, cookie.Value)
 		if errors.Is(err, sql.ErrNoRows) {
 			api.Error(w, http.StatusUnauthorized, api.CodeUnauthorized, "invalid refresh token")
 			return
 		}
-		if err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not look up token")
-			return
-		}
-
-		if time.Now().After(rt.ExpiresAt) {
+		if errors.Is(err, ErrRefreshTokenExpired) {
 			api.Error(w, http.StatusUnauthorized, api.CodeUnauthorized, "refresh token expired")
 			return
 		}
-
-		user, err := FindUserByID(r.Context(), cfg.DB, rt.UserID)
-		if err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not look up user")
-			return
-		}
-		if user == nil {
+		if errors.Is(err, ErrRefreshUserNotFound) {
 			api.Error(w, http.StatusUnauthorized, api.CodeUnauthorized, "user not found")
 			return
 		}
-
-		if _, err = cfg.DB.NewDelete().Model(rt).Where("id = ?", rt.ID).Exec(r.Context()); err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not rotate token")
-			return
-		}
-
-		accessToken, err := SignAccess(cfg.Tokens, user.ID, user.Email, user.Role)
 		if err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not sign token")
-			return
-		}
-
-		if err := issueRefreshCookie(r.Context(), cfg, w, user.ID); err != nil {
-			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not issue refresh token")
+			api.Error(w, http.StatusInternalServerError, api.CodeInternalError, "could not refresh session")
 			return
 		}
 
@@ -213,6 +192,7 @@ func Logout(cfg Config) http.HandlerFunc {
 			Secure:   cfg.CookieSecure,
 			SameSite: http.SameSiteLaxMode,
 		})
+		clearAccessCookie(cfg, w)
 
 		api.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
@@ -251,6 +231,51 @@ func cookieName(cfg Config) string {
 	return "reverb_refresh"
 }
 
+func accessCookieName(cfg Config) string {
+	return cfg.AccessCookieName
+}
+
+func issueAccessCookie(cfg Config, w http.ResponseWriter, token string) {
+	name := accessCookieName(cfg)
+	if name == "" {
+		return
+	}
+
+	ttl := cfg.Tokens.AccessTTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    token,
+		Path:     "/",
+		Domain:   cfg.CookieDomain,
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearAccessCookie(cfg Config, w http.ResponseWriter) {
+	name := accessCookieName(cfg)
+	if name == "" {
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		Domain:   cfg.CookieDomain,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 func issueRefreshCookie(ctx context.Context, cfg Config, w http.ResponseWriter, userID string) error {
 	raw, hashed, err := GenerateRefresh()
 	if err != nil {
@@ -285,4 +310,56 @@ func issueRefreshCookie(ctx context.Context, cfg Config, w http.ResponseWriter, 
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
+}
+
+var (
+	ErrRefreshTokenExpired = errors.New("auth: refresh token expired")
+	ErrRefreshUserNotFound = errors.New("auth: refresh user not found")
+)
+
+func refreshSession(ctx context.Context, cfg Config, w http.ResponseWriter, rawRefresh string) (string, *Session, error) {
+	hashed := HashRefresh(rawRefresh)
+
+	rt := new(db.RefreshToken)
+	err := cfg.DB.NewSelect().Model(rt).Where("token_hash = ?", hashed).Scan(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if time.Now().After(rt.ExpiresAt) {
+		return "", nil, ErrRefreshTokenExpired
+	}
+
+	user, err := FindUserByID(ctx, cfg.DB, rt.UserID)
+	if err != nil {
+		return "", nil, err
+	}
+	if user == nil {
+		return "", nil, ErrRefreshUserNotFound
+	}
+
+	if _, err = cfg.DB.NewDelete().Model(rt).Where("id = ?", rt.ID).Exec(ctx); err != nil {
+		return "", nil, err
+	}
+
+	accessToken, err := SignAccess(cfg.Tokens, user.ID, user.Email, user.Role)
+	if err != nil {
+		return "", nil, err
+	}
+
+	issueAccessCookie(cfg, w, accessToken)
+
+	if err := issueRefreshCookie(ctx, cfg, w, user.ID); err != nil {
+		return "", nil, err
+	}
+
+	return accessToken, &Session{
+		Claims: &Claims{
+			UserID: user.ID,
+			Email:  user.Email,
+			Role:   user.Role,
+		},
+		Source:    SessionSourceCookie,
+		Refreshed: true,
+	}, nil
 }

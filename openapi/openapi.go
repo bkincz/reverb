@@ -74,6 +74,9 @@ func buildPaths(reg *collections.Registry, authEnabled, storageEnabled bool) map
 		paths["/api/admin/collections"] = map[string]any{
 			"get": op("List schemas", "Return all registered collection schemas (admin only).", nil, response200(nil), true),
 		}
+		paths["/api/admin/collections/metadata"] = map[string]any{
+			"get": op("List collection metadata", "Return stable admin metadata for all registered collections (admin only).", nil, response200(ref("AdminCollectionsMetadataResponse")), true),
+		}
 	}
 
 	for _, e := range reg.All() {
@@ -158,6 +161,53 @@ func buildSchemas(reg *collections.Registry) map[string]any {
 			"properties": map[string]any{
 				"data":  array(ref("MediaResponse")),
 				"total": prop("integer", ""),
+			},
+		},
+		"AdminAccessRule": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"min_role": prop("string", ""),
+			},
+		},
+		"AdminAccessMetadata": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"read":   ref("AdminAccessRule"),
+				"write":  ref("AdminAccessRule"),
+				"delete": ref("AdminAccessRule"),
+			},
+		},
+		"AdminFieldMetadata": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":         prop("string", ""),
+				"type":         prop("string", ""),
+				"required":     prop("boolean", ""),
+				"access":       ref("AdminAccessRule"),
+				"options":      array(prop("string", "")),
+				"collection":   prop("string", ""),
+				"target_slug":  prop("string", ""),
+				"join_field":   prop("string", ""),
+				"item_schema":  ref("AdminFieldMetadata"),
+				"wrapped_type": ref("AdminFieldMetadata"),
+				"read_only":    prop("boolean", ""),
+				"write_only":   prop("boolean", ""),
+			},
+		},
+		"AdminCollectionMetadata": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"slug":        prop("string", ""),
+				"slug_source": prop("string", ""),
+				"versioned":   prop("boolean", ""),
+				"access":      ref("AdminAccessMetadata"),
+				"fields":      array(ref("AdminFieldMetadata")),
+			},
+		},
+		"AdminCollectionsMetadataResponse": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"data": array(ref("AdminCollectionMetadata")),
 			},
 		},
 	}

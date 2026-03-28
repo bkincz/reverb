@@ -354,3 +354,19 @@ func HandleAdminList(reg *Registry) http.HandlerFunc {
 		api.JSON(w, http.StatusOK, map[string]any{"data": out})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// HandleAdminMetadata
+// ---------------------------------------------------------------------------
+
+func HandleAdminMetadata(reg *Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		role := roleFromRequest(r)
+		if !roles.Allowed(role, "admin") {
+			api.Error(w, http.StatusForbidden, api.CodeForbidden, "insufficient role")
+			return
+		}
+
+		api.JSON(w, http.StatusOK, map[string]any{"data": AdminMetadata(reg)})
+	}
+}

@@ -29,7 +29,8 @@ func main() {
     rb := reverb.New(reverb.Config{
         DB: sqlite.New("data.db"),
         Auth: reverb.AuthConfig{
-            Secret: "your-secret-at-least-32-characters-long",
+            Secret:           "your-secret-at-least-32-characters-long",
+            AccessCookieName: "reverb_access", // optional, useful for same-origin SSR apps
         },
     })
 
@@ -117,6 +118,7 @@ GET    /api/collections/{slug}/{id}               get (or ?slug=human-slug)
 PATCH  /api/collections/{slug}/{id}               update (body: {status?, publish_at?, data: {...}})
 DELETE /api/collections/{slug}/{id}               delete (404 if entry not found)
 GET    /api/admin/collections                     schema introspection (admin only)
+GET    /api/admin/collections/metadata            stable admin metadata (admin only)
 GET    /api/collections/{slug}/{id}/versions      list version history (admin only)
 GET    /api/collections/{slug}/{id}/versions/{n}  get a specific version snapshot (admin only)
 ```
@@ -124,6 +126,8 @@ GET    /api/collections/{slug}/{id}/versions/{n}  get a specific version snapsho
 Version history is recorded on every update when the schema has `Versioned: true`. Each snapshot captures the state **before** the update was applied.
 
 Restricted fields are absent from responses entirely, not nulled.
+
+`GET /api/admin/collections/metadata` is the stable machine-readable admin surface.
 
 **Schema validation** — `Mount()` returns an error at startup if a collection schema has empty field names, duplicate field names, or a `SlugSource` that doesn't reference a known field.
 
@@ -133,11 +137,15 @@ Restricted fields are absent from responses entirely, not nulled.
 
 ```
 POST /_reverb/auth/register    {email, password}
-POST /_reverb/auth/login       {email, password}  -> access token + refresh cookie
-POST /_reverb/auth/refresh     rotates refresh token
+POST /_reverb/auth/login       {email, password}  -> access token + refresh cookie (+ optional access cookie)
+POST /_reverb/auth/refresh     rotates refresh token (+ optional access cookie)
 POST /_reverb/auth/logout
 GET  /_reverb/auth/me
 ```
+
+Reverb always supports `Authorization: Bearer <token>`. If `Auth.AccessCookieName` is set, Reverb also issues an HttpOnly access-token cookie on register, login, and refresh.
+
+`RequireAuth`, `ParseAuth`, and `ResolveSessionWithRefresh` support same-origin cookie sessions when `Auth.AccessCookieName` is enabled.
 
 Protect your own routes:
 
@@ -147,6 +155,20 @@ mux.Handle("DELETE /posts/{id}", rb.RequireRole("editor")(deleteHandler))
 
 // ParseAuth injects claims when a token is present but does not block public access.
 mux.Handle("GET /feed", rb.ParseAuth()(feedHandler))
+```
+
+Resolve the current session directly from an incoming request when you need SSR-friendly auth handling outside middleware:
+
+```go
+session, err := rb.ResolveSession(r)
+if err == nil {
+    fmt.Println(session.Claims.Email, session.Source) // "header" or "cookie"
+}
+
+session, err = rb.ResolveSessionWithRefresh(w, r)
+if err == nil && session.Refreshed {
+    fmt.Println("cookies were rotated for this request")
+}
 ```
 
 ---

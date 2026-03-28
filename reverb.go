@@ -43,11 +43,12 @@ type JobsConfig struct {
 }
 
 type AuthConfig struct {
-	Secret       string
-	AccessTTL    time.Duration
-	RefreshTTL   time.Duration
-	CookieSecure bool
-	CookieDomain string
+	Secret           string
+	AccessTTL        time.Duration
+	RefreshTTL       time.Duration
+	AccessCookieName string
+	CookieSecure     bool
+	CookieDomain     string
 }
 
 type FormsConfig struct {
@@ -224,8 +225,9 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 				AccessTTL:  r.cfg.Auth.AccessTTL,
 				RefreshTTL: r.cfg.Auth.RefreshTTL,
 			},
-			CookieSecure: r.cfg.Auth.CookieSecure,
-			CookieDomain: r.cfg.Auth.CookieDomain,
+			AccessCookieName: r.cfg.Auth.AccessCookieName,
+			CookieSecure:     r.cfg.Auth.CookieSecure,
+			CookieDomain:     r.cfg.Auth.CookieDomain,
 		}
 	}
 
@@ -266,6 +268,7 @@ func (r *Reverb) Mount(ctx context.Context, target MountTarget) error {
 		rl := auth.NewRateLimiter(10, r.clientIP)
 
 		target.Handle("GET /api/admin/collections", r.adminMiddleware(collections.HandleAdminList(r.registry)))
+		target.Handle("GET /api/admin/collections/metadata", r.adminMiddleware(collections.HandleAdminMetadata(r.registry)))
 		target.Handle("POST /_reverb/auth/register", rl(auth.Register(r.authCfg)))
 		target.Handle("POST /_reverb/auth/login", rl(auth.Login(r.authCfg)))
 		target.Handle("POST /_reverb/auth/refresh", rl(auth.Refresh(r.authCfg)))
@@ -332,6 +335,18 @@ func (r *Reverb) RequireRole(role string) func(http.Handler) http.Handler {
 
 func (r *Reverb) ParseAuth() func(http.Handler) http.Handler {
 	return auth.ParseAuth(r.authCfg)
+}
+
+func (r *Reverb) ResolveSession(req *http.Request) (*auth.Session, error) {
+	return auth.ResolveSession(r.authCfg, req)
+}
+
+func (r *Reverb) ResolveSessionWithRefresh(w http.ResponseWriter, req *http.Request) (*auth.Session, error) {
+	return auth.ResolveSessionWithRefresh(r.authCfg, w, req)
+}
+
+func (r *Reverb) AdminCollectionMetadata() []collections.AdminCollectionMetadata {
+	return collections.AdminMetadata(r.registry)
 }
 
 func (r *Reverb) SetImageProcessor(p storage.ImageProcessor) {

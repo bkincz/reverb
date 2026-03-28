@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,6 +92,24 @@ func getWithBearer(handler http.Handler, path, token string) *httptest.ResponseR
 	return rr
 }
 
+func getWithCookie(handler http.Handler, path, cookieName, cookieVal string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: cookieVal})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func getWithCookies(handler http.Handler, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
 func extractCookie(rr *httptest.ResponseRecorder, name string) string {
 	for _, c := range rr.Result().Cookies() {
 		if c.Name == name {
@@ -129,6 +148,19 @@ func TestRegister_Success(t *testing.T) {
 	cookie := extractCookie(rr, "reverb_refresh")
 	if cookie == "" {
 		t.Fatal("expected refresh cookie to be set")
+	}
+}
+
+func TestRegister_IssuesAccessCookieWhenConfigured(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+
+	rr := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"alice-cookie@example.com","password":"supersecret"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d", rr.Code)
+	}
+	if extractCookie(rr, "reverb_access") == "" {
+		t.Fatal("expected access cookie to be set")
 	}
 }
 
@@ -171,6 +203,20 @@ func TestLogin_Success(t *testing.T) {
 	}
 	if extractAccessToken(t, rr) == "" {
 		t.Fatal("expected access_token")
+	}
+}
+
+func TestLogin_IssuesAccessCookieWhenConfigured(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"cookie-login@example.com","password":"password123"}`)
+
+	rr := post(auth.Login(cfg), "/_reverb/auth/login", `{"email":"cookie-login@example.com","password":"password123"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	if extractCookie(rr, "reverb_access") == "" {
+		t.Fatal("expected access cookie to be set")
 	}
 }
 
@@ -257,6 +303,24 @@ func TestRefresh_MissingCookie(t *testing.T) {
 	}
 }
 
+func TestRefresh_IssuesAccessCookieWhenConfigured(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"refresh-cookie@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	rr := postWithCookie(auth.Refresh(cfg), "/_reverb/auth/refresh", "", "reverb_refresh", refreshCookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	if extractCookie(rr, "reverb_access") == "" {
+		t.Fatal("expected access cookie to be set")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Logout
 // ---------------------------------------------------------------------------
@@ -276,6 +340,32 @@ func TestLogout_ClearsCookie(t *testing.T) {
 		if c.Name == "reverb_refresh" && c.MaxAge > 0 {
 			t.Fatal("cookie was not cleared")
 		}
+	}
+}
+
+func TestLogout_ClearsAccessCookieWhenConfigured(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"logout-access@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	accessCookie := extractCookie(regRR, "reverb_access")
+	if refreshCookie == "" || accessCookie == "" {
+		t.Fatal("expected refresh and access cookies to be set")
+	}
+
+	rr := postWithCookie(auth.Logout(cfg), "/_reverb/auth/logout", "", "reverb_refresh", refreshCookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+
+	cleared := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "reverb_access" && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("expected access cookie to be cleared")
 	}
 }
 
@@ -322,6 +412,80 @@ func TestRequireAuth_NoToken(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_ValidAccessCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	token, err := auth.SignAccess(cfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	handler := auth.RequireAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	rr := getWithCookie(handler, "/", "reverb_access", token)
+	if rr.Code != http.StatusOK || !called {
+		t.Fatalf("want 200+handler called, got %d called=%v", rr.Code, called)
+	}
+}
+
+func TestRequireAuth_RefreshesFromRefreshCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"refresh-auth@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	called := false
+	handler := auth.RequireAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		session, ok := auth.SessionFromContext(r.Context())
+		if !ok || !session.Refreshed {
+			t.Fatal("expected refreshed session in context")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	rr := getWithCookie(handler, "/", "reverb_refresh", refreshCookie)
+	if rr.Code != http.StatusOK || !called {
+		t.Fatalf("want 200+handler called, got %d called=%v", rr.Code, called)
+	}
+	if extractCookie(rr, "reverb_access") == "" {
+		t.Fatal("expected refreshed access cookie to be set")
+	}
+	if newRefresh := extractCookie(rr, "reverb_refresh"); newRefresh == "" || newRefresh == refreshCookie {
+		t.Fatal("expected refresh cookie rotation")
+	}
+}
+
+func TestRequireAuth_HeaderWinsOverCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	validToken, err := auth.SignAccess(cfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := auth.RequireAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+"totally.invalid.jwt")
+	req.AddCookie(&http.Cookie{Name: "reverb_access", Value: validToken})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", rr.Code)
+	}
+}
+
 func TestRequireAuth_InvalidToken(t *testing.T) {
 	cfg := newTestConfig(t)
 	handler := auth.RequireAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -331,6 +495,168 @@ func TestRequireAuth_InvalidToken(t *testing.T) {
 	rr := getWithBearer(handler, "/", "totally.invalid.jwt")
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rr.Code)
+	}
+}
+
+func TestResolveSession_FromHeader(t *testing.T) {
+	cfg := newTestConfig(t)
+	token, err := auth.SignAccess(cfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	session, err := auth.ResolveSession(cfg, req)
+	if err != nil {
+		t.Fatalf("ResolveSession: %v", err)
+	}
+	if session.Source != auth.SessionSourceHeader {
+		t.Fatalf("source = %q, want %q", session.Source, auth.SessionSourceHeader)
+	}
+	if session.Claims.Email != "u@u.com" {
+		t.Fatalf("email = %q, want %q", session.Claims.Email, "u@u.com")
+	}
+}
+
+func TestResolveSession_FromCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	token, err := auth.SignAccess(cfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "reverb_access", Value: token})
+	session, err := auth.ResolveSession(cfg, req)
+	if err != nil {
+		t.Fatalf("ResolveSession: %v", err)
+	}
+	if session.Source != auth.SessionSourceCookie {
+		t.Fatalf("source = %q, want %q", session.Source, auth.SessionSourceCookie)
+	}
+}
+
+func TestResolveSessionWithRefresh_FromRefreshCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"resolve-refresh@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "reverb_refresh", Value: refreshCookie})
+	rr := httptest.NewRecorder()
+	session, err := auth.ResolveSessionWithRefresh(cfg, rr, req)
+	if err != nil {
+		t.Fatalf("ResolveSessionWithRefresh: %v", err)
+	}
+	if session.Source != auth.SessionSourceCookie || !session.Refreshed {
+		t.Fatalf("expected refreshed cookie session, got %+v", session)
+	}
+	if extractCookie(rr, "reverb_access") == "" {
+		t.Fatal("expected refreshed access cookie")
+	}
+}
+
+func TestResolveSessionWithRefresh_ExpiredAccessCookieUsesRefreshCookie(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"expired-refresh@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	expiredCfg := cfg
+	expiredCfg.Tokens.AccessTTL = -1 * time.Minute
+	expiredToken, err := auth.SignAccess(expiredCfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "reverb_access", Value: expiredToken})
+	req.AddCookie(&http.Cookie{Name: "reverb_refresh", Value: refreshCookie})
+	rr := httptest.NewRecorder()
+	session, err := auth.ResolveSessionWithRefresh(cfg, rr, req)
+	if err != nil {
+		t.Fatalf("ResolveSessionWithRefresh: %v", err)
+	}
+	if !session.Refreshed {
+		t.Fatal("expected session to be refreshed")
+	}
+}
+
+func TestResolveSessionWithRefresh_HeaderDoesNotUseRefreshFallback(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"header-strict@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+"totally.invalid.jwt")
+	req.AddCookie(&http.Cookie{Name: "reverb_refresh", Value: refreshCookie})
+	rr := httptest.NewRecorder()
+	_, err := auth.ResolveSessionWithRefresh(cfg, rr, req)
+	if err == nil {
+		t.Fatal("expected header auth failure")
+	}
+	if extractCookie(rr, "reverb_access") != "" {
+		t.Fatal("did not expect refresh fallback for header auth")
+	}
+}
+
+func TestResolveSessionWithRefresh_RequiresAccessCookieMode(t *testing.T) {
+	cfg := newTestConfig(t)
+	regRR := post(auth.Register(cfg), "/_reverb/auth/register", `{"email":"no-cookie-mode@example.com","password":"password123"}`)
+	refreshCookie := extractCookie(regRR, "reverb_refresh")
+	if refreshCookie == "" {
+		t.Fatal("expected refresh cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "reverb_refresh", Value: refreshCookie})
+	rr := httptest.NewRecorder()
+	_, err := auth.ResolveSessionWithRefresh(cfg, rr, req)
+	if !errors.Is(err, auth.ErrMissingAuth) {
+		t.Fatalf("expected missing auth, got %v", err)
+	}
+}
+
+func TestParseAuth_WithCookieInjectsClaimsAndSession(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AccessCookieName = "reverb_access"
+	token, err := auth.SignAccess(cfg.Tokens, "user-1", "u@u.com", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		gotClaims  *auth.Claims
+		gotSession *auth.Session
+	)
+	handler := auth.ParseAuth(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClaims, _ = auth.ClaimsFromContext(r.Context())
+		gotSession, _ = auth.SessionFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	rr := getWithCookie(handler, "/", "reverb_access", token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	if gotClaims == nil || gotClaims.Email != "u@u.com" {
+		t.Fatal("expected claims from cookie auth")
+	}
+	if gotSession == nil || gotSession.Source != auth.SessionSourceCookie {
+		t.Fatal("expected session metadata from cookie auth")
 	}
 }
 

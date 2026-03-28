@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -75,6 +76,10 @@ func VerifyAccess(cfg TokenConfig, tokenStr string) (*Claims, error) {
 	}
 
 	return claims, nil
+}
+
+func IsExpiredAccessError(err error) bool {
+	return errors.Is(err, jwt.ErrTokenExpired)
 }
 
 func GenerateRefresh() (raw string, hashed string, err error) {

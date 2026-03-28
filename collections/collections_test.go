@@ -528,3 +528,149 @@ func TestHandleAdminList_RequiresAdmin(t *testing.T) {
 		t.Fatalf("admin: want 200, got %d — %s", rr.Code, rr.Body)
 	}
 }
+
+func TestHandleAdminMetadata_RequiresAdminAndReturnsStableShape(t *testing.T) {
+	reg := collections.NewRegistry()
+	reg.Register("z-posts", collections.Schema{
+		Access: collections.Access{
+			Read:   collections.Role("viewer"),
+			Write:  collections.Role("editor"),
+			Delete: collections.Role("admin"),
+		},
+		Fields: []collections.Field{
+			{Name: "title", Type: collections.TypeText, Required: true},
+			{Name: "status", Type: collections.TypeSelect, Options: []string{"draft", "published"}},
+			{Name: "author", Type: collections.TypeRelation, Collection: "users", TargetSlug: "users"},
+			{Name: "related_posts", Type: collections.TypeJoin, Collection: "posts", JoinField: "post_id"},
+			{Name: "password", Type: collections.TypePassword},
+			{
+				Name: "tags",
+				Type: collections.TypeArray,
+				ItemSchema: &collections.Field{
+					Name:     "tag",
+					Type:     collections.TypeText,
+					Required: true,
+				},
+			},
+			{
+				Name: "localized_title",
+				Type: collections.TypeLocale,
+				WrappedType: &collections.Field{
+					Name:     "value",
+					Type:     collections.TypeText,
+					Required: true,
+				},
+			},
+		},
+		SlugSource: "title",
+		Versioned:  true,
+	})
+	reg.Register("a-authors", collections.Schema{
+		Access: collections.Access{
+			Read: collections.Public,
+		},
+		Fields: []collections.Field{
+			{Name: "name", Type: collections.TypeText, Required: true},
+		},
+	})
+
+	h := collections.HandleAdminMetadata(reg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/collections/metadata", nil)
+	rr := serve(h, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", rr.Code)
+	}
+
+	tok := signToken(t, "viewer")
+	req = bearerRequest(http.MethodGet, "/api/admin/collections/metadata", "", tok)
+	rr = serveWithAuth(h, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("viewer: want 403, got %d", rr.Code)
+	}
+
+	tok = signToken(t, "admin")
+	req = bearerRequest(http.MethodGet, "/api/admin/collections/metadata", "", tok)
+	rr = serveWithAuth(h, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin: want 200, got %d — %s", rr.Code, rr.Body)
+	}
+
+	body := decodeBody(t, rr)
+	data, ok := body["data"].([]any)
+	if !ok {
+		t.Fatalf("expected data array, got %T", body["data"])
+	}
+	if len(data) != 2 {
+		t.Fatalf("want 2 collections, got %d", len(data))
+	}
+
+	first, _ := data[0].(map[string]any)
+	second, _ := data[1].(map[string]any)
+	if first["slug"] != "a-authors" || second["slug"] != "z-posts" {
+		t.Fatalf("collections should be sorted by slug, got %v then %v", first["slug"], second["slug"])
+	}
+
+	if second["slug_source"] != "title" {
+		t.Fatalf("want slug_source=title, got %v", second["slug_source"])
+	}
+	if second["versioned"] != true {
+		t.Fatalf("want versioned=true, got %v", second["versioned"])
+	}
+
+	access, ok := second["access"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected access object, got %T", second["access"])
+	}
+	read, _ := access["read"].(map[string]any)
+	write, _ := access["write"].(map[string]any)
+	deleteRule, _ := access["delete"].(map[string]any)
+	if read["min_role"] != "viewer" || write["min_role"] != "editor" || deleteRule["min_role"] != "admin" {
+		t.Fatalf("unexpected access metadata: %+v", access)
+	}
+
+	fields, ok := second["fields"].([]any)
+	if !ok {
+		t.Fatalf("expected fields array, got %T", second["fields"])
+	}
+	fieldsByName := make(map[string]map[string]any, len(fields))
+	for _, field := range fields {
+		m, ok := field.(map[string]any)
+		if !ok {
+			t.Fatalf("expected field object, got %T", field)
+		}
+		name, _ := m["name"].(string)
+		fieldsByName[name] = m
+	}
+
+	if fieldsByName["title"]["type"] != "text" || fieldsByName["title"]["required"] != true {
+		t.Fatalf("title metadata mismatch: %+v", fieldsByName["title"])
+	}
+
+	statusOptions, ok := fieldsByName["status"]["options"].([]any)
+	if !ok || len(statusOptions) != 2 || statusOptions[1] != "published" {
+		t.Fatalf("status options mismatch: %+v", fieldsByName["status"]["options"])
+	}
+
+	if fieldsByName["author"]["collection"] != "users" || fieldsByName["author"]["target_slug"] != "users" {
+		t.Fatalf("author relation metadata mismatch: %+v", fieldsByName["author"])
+	}
+
+	if fieldsByName["related_posts"]["read_only"] != true || fieldsByName["related_posts"]["join_field"] != "post_id" {
+		t.Fatalf("join metadata mismatch: %+v", fieldsByName["related_posts"])
+	}
+
+	if fieldsByName["password"]["write_only"] != true {
+		t.Fatalf("password metadata should be write_only: %+v", fieldsByName["password"])
+	}
+
+	itemSchema, ok := fieldsByName["tags"]["item_schema"].(map[string]any)
+	if !ok || itemSchema["name"] != "tag" || itemSchema["type"] != "text" || itemSchema["required"] != true {
+		t.Fatalf("array item schema mismatch: %+v", fieldsByName["tags"]["item_schema"])
+	}
+
+	wrappedType, ok := fieldsByName["localized_title"]["wrapped_type"].(map[string]any)
+	if !ok || wrappedType["name"] != "value" || wrappedType["type"] != "text" || wrappedType["required"] != true {
+		t.Fatalf("wrapped type mismatch: %+v", fieldsByName["localized_title"]["wrapped_type"])
+	}
+}
